@@ -29,7 +29,9 @@ xhs-monitor/
 │   ├── run_admin.bat          # Windows 一键启动（自动清代理）
 │   ├── static/index.html      # 前端单文件
 │   └── data/                  # 运行时数据库（.gitkeep 占位，首次启动自动建）
-├── Spider_XHS/                # 小红书纯 SDK（含本项目所需修复，源自 cv-cat/Spider_XHS）
+├── patches/                   # Spider_XHS 必要修复补丁（spider_xhs_fixes.patch，见"已知限制"）
+├── scripts/                   # 一键获取 SDK：克隆 Spider_XHS 到仓库根并应用补丁（setup_sdk.bat / .sh）
+├── Spider_XHS/                # 由 setup 脚本自动获取（克隆自 cv-cat/Spider_XHS + 补丁），不入库
 ├── README.md
 ├── .gitignore
 └── LICENSE
@@ -52,9 +54,13 @@ xhs-monitor/
 
 ```bash
 # 1. 克隆
-git clone <your-repo-url> xhs-monitor && cd xhs-monitor
+git clone https://github.com/chiron09/xhs-monitor.git xhs-monitor && cd xhs-monitor
 
-# 2. 创建虚拟环境并安装依赖
+# 2. 获取 Spider_XHS SDK 并应用本项目修复补丁
+#    Windows: scripts\setup_sdk.bat        Linux / macOS: bash scripts/setup_sdk.sh
+scripts\setup_sdk.bat
+
+# 3. 创建虚拟环境并安装依赖
 python -m venv venv
 source venv/bin/activate          # Windows: venv\Scripts\activate
 
@@ -113,7 +119,7 @@ NO_PROXY='*' uvicorn app:app --host 127.0.0.1 --port 8000
 
 - **登录风控**：小红书对登录类接口（扫码换 session、发短信）的风控远严于数据接口。服务器用 `curl_cffi` 模拟浏览器直连登录会被拦截（数据抓取不受影响）。因此登录必须走真实浏览器（浏览器登录方式）。
 - **`get_user_me` 游客态**：未登录时该接口仍返回 `success: true`（游客带匿名 user_id + `guest: true`）。Cookie 有效性检测必须校验 `guest` 字段，否则会把游客态误判为已登录。
-- **Spider_XHS 修复**：本仓库内置的 Spider_XHS 做了三处必要修复——`curl_cffi` 锁 `0.16.3`、指纹 `chrome146 → chrome150`、以及 `curl_cffi 0.16.x` 下 `data` 不再当 raw body 发送的 body 修复。重装依赖或升级 `curl_cffi` 前请确认这些修复不丢失。
+- **Spider_XHS 修复**：Spider_XHS 本体来自上游 [cv-cat/Spider_XHS](https://github.com/cv-cat/Spider_XHS)（由 setup 脚本自动克隆，不入库）。本项目依赖三处必要修复——`curl_cffi` 锁 `0.16.3`、指纹 `chrome146 → chrome150`、以及 `curl_cffi 0.16.x` 下 `data` 不再当 raw body 发送的 body 修复——以补丁形式提供于 [`patches/spider_xhs_fixes.patch`](patches/spider_xhs_fixes.patch)，由 setup 脚本自动应用。更新 SDK 或重装依赖后请确认补丁仍生效。
 - **CDP 连接**：Python 用 `websocket-client` 连 Chrome 调试端口必须 `suppress_origin=True`（否则 Chrome 403 拒绝）；启动 Chrome 时加 `--remote-allow-origins=*` 兜底。
 - **代理**：务必在启动前清除代理（`NO_PROXY='*'`），否则 SDK 请求会被代理劫持。
 

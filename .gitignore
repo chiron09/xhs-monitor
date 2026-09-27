@@ -15,7 +15,8 @@ env/
 xhs_admin/data/*.db
 xhs_admin/data/chrome_profile/
 
-# ===== Spider_XHS 凭据 / 缓存（含真实 Cookie）=====
+# ===== Spider_XHS（SDK 由 scripts/setup_sdk.* 自动获取，不入库）=====
+Spider_XHS/
 Spider_XHS/.env
 Spider_XHS/creator_cookie.json
 Spider_XHS/_live_session.json

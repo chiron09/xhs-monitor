@@ -1,0 +1,56 @@
+diff --git a/requirements.txt b/requirements.txt
+index 8c5e322..ac543da 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,6 +1,6 @@
+ PyExecJS
+ requests
+-curl_cffi==0.15.0
++curl_cffi==0.16.3
+ loguru
+ python-dotenv
+ retry
+diff --git a/xhs_utils/xhs_core/http.py b/xhs_utils/xhs_core/http.py
+index c091bc1..bff3300 100644
+--- a/xhs_utils/xhs_core/http.py
++++ b/xhs_utils/xhs_core/http.py
+@@ -13,7 +13,7 @@ from typing import Any, Optional
+ from curl_cffi import requests as curl_requests
+ 
+ 
+-DEFAULT_IMPERSONATE = 'chrome146'
++DEFAULT_IMPERSONATE = 'chrome150'
+ DEFAULT_ACCEPT_ENCODING = 'gzip, deflate, br, zstd'
+ DEFAULT_HTTP_VERSION = 'v2tls'
+ 
+@@ -137,10 +137,17 @@ class BrowserHttpClient:
+         body = kwargs.get('data')
+         has_json = kwargs.get('json') is not None
+         has_multipart = kwargs.get('multipart') is not None
++        # curl_cffi 0.16.x no longer transmits a str/bytes ``data`` as the raw
++        # request body; it treats it as a single form field.  Route the raw
++        # body through ``content`` (curl_cffi's raw-body channel) instead.
++        if isinstance(body, (str, bytes)) and not has_json and not has_multipart:
++            kwargs.pop('data', None)
++            kwargs['content'] = body.encode('utf-8') if isinstance(body, str) else body
+         if (
+             upper_method == 'POST'
+             and not has_json
+             and not has_multipart
++            and 'content' not in kwargs
+             and body in (None, '', b'')
+             and 'content-type' not in lowered
+         ):
+diff --git a/xhs_utils/xhs_pc/http.py b/xhs_utils/xhs_pc/http.py
+index 8b4170b..c57aa0e 100644
+--- a/xhs_utils/xhs_pc/http.py
++++ b/xhs_utils/xhs_pc/http.py
+@@ -7,7 +7,7 @@ from typing import Optional
+ from xhs_utils.xhs_core.http import BrowserHttpClient
+ 
+ 
+-PC_IMPERSONATE = 'chrome146'
++PC_IMPERSONATE = 'chrome150'
+ PC_ACCEPT_ENCODING = 'gzip, deflate, br, zstd'
+ PC_HTTP_VERSION = 'v2tls'
+ 
