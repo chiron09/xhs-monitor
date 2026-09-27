@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+sqlalchemy
+apscheduler
+pydantic
+# 以下由 Spider_XHS SDK 需要（已在共享 venv 中）：
+curl_cffi==0.16.3
+requests
+qrcode
+pillow
+# 浏览器登录（CDP 通信）
+websocket-client

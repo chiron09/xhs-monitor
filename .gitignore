@@ -1,0 +1,31 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ===== 备份 / 日志 / 临时 =====
+*.bak
+*.log
+*.old
+
+# ===== xhs_admin 运行时数据（含明文小红书 Cookie，禁止提交）=====
+xhs_admin/data/*.db
+xhs_admin/data/chrome_profile/
+
+# ===== Spider_XHS 凭据 / 缓存（含真实 Cookie）=====
+Spider_XHS/.env
+Spider_XHS/creator_cookie.json
+Spider_XHS/_live_session.json
+Spider_XHS/node_modules/
+Spider_XHS/datas/
+
+# ===== 编辑器 / 系统 =====
+.idea/
+.vscode/
+.DS_Store
+
+# ===== 打包产物 =====
+*.zip
