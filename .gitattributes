@@ -1,0 +1,7 @@
+# Normalize line endings: repo stores LF; check out per rules below.
+* text=auto
+
+# Patch and shell scripts MUST stay LF, or `git apply` / `bash` break on Windows.
+*.patch text eol=lf
+*.sh text eol=lf
+*.bat text eol=crlf
