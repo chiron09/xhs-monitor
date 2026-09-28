@@ -225,8 +225,11 @@ def status() -> dict:
     if ok:
         return {"running": True, "logged_in": True, "nickname": nickname, "user_id": uid,
                 "cookie": cookie_str, "account": None, "message": "登录成功"}
+    # 已检测到登录，但本地校验失败：如实反馈（不能谎报"等待登录中…"，
+    # 否则用户已登录成功却看到页面毫无进展）。
     return {"running": True, "logged_in": False, "nickname": "", "user_id": "",
-            "cookie": "", "account": None, "message": "等待登录中…"}
+            "cookie": "", "account": None,
+            "message": "已检测到浏览器登录，但校验未通过：" + (err or "未知原因")}
 
 
 def cleanup_profile() -> bool:

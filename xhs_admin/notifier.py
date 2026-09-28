@@ -188,6 +188,27 @@ def notify_new_notes(config: dict, blogger_name: str, new_notes: list) -> dict:
     return {"ok_count": ok_count, "failures": failures}
 
 
+def notify_custom(config: dict, title: str, content: str) -> dict:
+    """向所有启用的渠道推送自定义消息（如账号过期告警）。返回 {ok_count, failures}。"""
+    if not config or not config.get("enabled"):
+        return {"ok_count": 0, "failures": []}
+    channels = config.get("channels") or {}
+    ok_count, failures = 0, []
+    for name, send in _SENDERS.items():
+        c = channels.get(name) or {}
+        if not c.get("enabled"):
+            continue
+        if not _has_credential(name, c):
+            failures.append(f"{name}: 凭据未填完整")
+            continue
+        try:
+            send(c, title, content)
+            ok_count += 1
+        except Exception as e:  # noqa: BLE001
+            failures.append(f"{name}: {e}")
+    return {"ok_count": ok_count, "failures": failures}
+
+
 def send_test(config: dict) -> dict:
     """向所有启用的渠道发一条测试消息。返回 {ok_count, failures}。"""
     if not config:

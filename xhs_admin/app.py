@@ -7,11 +7,13 @@ from datetime import datetime
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import update as sa_update
 
 import browser_login
+import covers
 import notifier
 import scheduler
 import xhs_client
@@ -46,6 +48,10 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="小红书博主监控后台", lifespan=lifespan)
 
+# 封面图静态服务（抓取时已本地化到 data/covers/，避免 CDN 链接过期 403）
+os.makedirs(covers.COVERS_DIR, exist_ok=True)
+app.mount("/covers", StaticFiles(directory=covers.COVERS_DIR), name="covers")
+
 
 def require_auth(authorization: str = Header(default="")):
     token = authorization.replace("Bearer", "").strip()
@@ -66,6 +72,10 @@ class PasswordRequest(BaseModel):
 
 class AccountCreate(BaseModel):
     name: str = ""
+    cookie: str = ""
+
+
+class CookieUpdate(BaseModel):
     cookie: str = ""
 
 
@@ -176,22 +186,43 @@ def list_accounts(_=Depends(require_auth)):
 
 
 def _persist_account(cookie: str, name: str = "") -> dict:
-    """校验 cookie 并落库为账号，返回 {ok, error, item}。"""
+    """校验 cookie 并落库为账号；同一小红书号（xhs_user_id）或同名账号已存在时，更新其 Cookie 而非新建。
+
+    校验失败时一律不写库（不新建垃圾账号，也不覆盖原有登录态）。
+    """
     ok, nickname, uid, err = xhs_client.check_cookie(cookie)
+    if not ok:
+        return {"ok": False, "error": err or "Cookie 校验未通过", "item": None}
     db = SessionLocal()
     try:
-        acc = Account(
-            name=name or nickname or "未命名账号",
-            cookie=cookie,
-            nickname=nickname,
-            xhs_user_id=uid,
-            status="active" if ok else "expired",
-            last_checked_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        )
-        db.add(acc)
+        acc = None
+        if uid:
+            acc = db.query(Account).filter(Account.xhs_user_id == uid).first()
+        if acc is None and name:
+            acc = db.query(Account).filter(Account.name == name).first()
+        if acc is None:
+            acc = Account(
+                name=name or nickname or "未命名账号",
+                cookie=cookie,
+                nickname=nickname,
+                xhs_user_id=uid,
+                status="active",
+                last_checked_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            )
+            db.add(acc)
+            updated = False
+        else:
+            acc.cookie = cookie
+            acc.nickname = nickname or acc.nickname
+            acc.xhs_user_id = uid or acc.xhs_user_id
+            acc.status = "active"
+            acc.last_checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            if name:
+                acc.name = name
+            updated = True
         db.commit()
         db.refresh(acc)
-        return {"ok": ok, "error": err, "item": acc.to_dict()}
+        return {"ok": True, "error": "", "item": acc.to_dict(), "updated": updated}
     finally:
         db.close()
 
@@ -199,6 +230,29 @@ def _persist_account(cookie: str, name: str = "") -> dict:
 @app.post("/api/accounts")
 def create_account(req: AccountCreate, _=Depends(require_auth)):
     return _persist_account(req.cookie, req.name)
+
+
+@app.put("/api/accounts/{account_id}")
+def update_account_cookie(account_id: int, req: CookieUpdate, _=Depends(require_auth)):
+    """更新已有账号的 Cookie：校验通过才替换，失败不动原值。"""
+    db = SessionLocal()
+    try:
+        acc = db.get(Account, account_id)
+        if not acc:
+            raise HTTPException(status_code=404, detail="账号不存在")
+        ok, nickname, uid, err = xhs_client.check_cookie(req.cookie)
+        if not ok:
+            return {"ok": False, "error": err or "Cookie 校验未通过，未更新原登录态"}
+        acc.cookie = req.cookie
+        acc.nickname = nickname or acc.nickname
+        acc.xhs_user_id = uid or acc.xhs_user_id
+        acc.status = "active"
+        acc.last_checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        db.commit()
+        db.refresh(acc)
+        return {"ok": True, "item": acc.to_dict()}
+    finally:
+        db.close()
 
 
 # ---- 浏览器登录（推荐：登录类接口服务器直连会被风控，交给真实浏览器）----
@@ -213,14 +267,15 @@ def browser_login_status(name: str = "", _=Depends(require_auth)):
     result = browser_login.status()
     if result.get("logged_in") and result.get("cookie") and not result.get("account"):
         saved = _persist_account(result.pop("cookie", ""), name)
-        browser_login.set_account(saved["item"])
-        result["account"] = saved["item"]
-        result["nickname"] = saved["item"].get("nickname", "")
-        if saved["ok"]:
+        if saved.get("ok") and saved.get("item"):
+            browser_login.set_account(saved["item"])
+            result["account"] = saved["item"]
+            result["nickname"] = saved["item"].get("nickname", "")
             browser_login.stop()
-            result["message"] = "登录成功，账号已添加"
+            result["message"] = "登录成功，已更新原账号的登录态" if saved.get("updated") else "登录成功，账号已添加"
         else:
-            result["message"] = "已登录，但账号校验未通过：" + (saved["error"] or "未知原因")
+            result["message"] = "已检测到登录，但账号校验未通过：" + (saved.get("error") or "未知原因") + "（可关闭浏览器后重试）"
+            browser_login.stop()
     result.pop("cookie", None)
     return result
 

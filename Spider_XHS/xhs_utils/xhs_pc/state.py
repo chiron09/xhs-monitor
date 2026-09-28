@@ -523,7 +523,11 @@ class PcDeviceProfile:
             return '0301'
         if '/api/sec/v1/' in value or '/api/redcaptcha/' in value or 'sem_sdk' in value:
             return '0201'
-        return '0101'
+        # 冷启动（cookie 里尚无 gid、指纹未就绪）也统一走 0301：
+        # sign.js 对 0101 的输出（x3 长度 150）不满足门禁表（205），会把
+        # bootstrap 卡死在"未就绪→0101→门禁拒绝→永远拿不到 gid"的死循环里。
+        # user/me 接受 0301 签名（已被真实请求验证），gid 到位后本就切 0301。
+        return '0301'
 
     def set_mns_stage(
         self,

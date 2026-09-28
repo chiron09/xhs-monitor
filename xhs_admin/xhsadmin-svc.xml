@@ -1,0 +1,21 @@
+<service>
+  <id>XhsAdmin</id>
+  <name>XHS Admin (Xiaohongshu Monitor Backend)</name>
+  <description>Xiaohongshu blogger monitor backend at http://127.0.0.1:8000</description>
+  <executable>C:\Users\Administrator\.workbuddy\binaries\python\envs\default\Scripts\python.exe</executable>
+  <arguments>-m uvicorn app:app --host 127.0.0.1 --port 8000</arguments>
+  <workingdirectory>C:\Workbuddy\xhs_admin</workingdirectory>
+  <startmode>Automatic</startmode>
+  <env name="NO_PROXY" value="*"/>
+  <env name="PYTHONUTF8" value="1"/>
+  <env name="HTTP_PROXY" value=""/>
+  <env name="HTTPS_PROXY" value=""/>
+  <env name="http_proxy" value=""/>
+  <env name="https_proxy" value=""/>
+  <log mode="roll-by-size">
+    <logpath>C:\Workbuddy\tools</logpath>
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>3</keepFiles>
+  </log>
+  <onfailure action="restart" delay="10 sec"/>
+</service>

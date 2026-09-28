@@ -4,9 +4,8 @@ import os
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Spider_XHS 纯 SDK 目录。仓库内默认相对路径（../Spider_XHS），
-# 换机器/非标准布局可用环境变量 XHS_SDK_DIR 覆盖。
-SDK_DIR = os.environ.get("XHS_SDK_DIR") or os.path.join(BASE_DIR, "..", "Spider_XHS")
+# Spider_XHS 纯 SDK 目录（默认本机路径，换机器可用环境变量 XHS_SDK_DIR 覆盖）
+SDK_DIR = os.environ.get("XHS_SDK_DIR") or r"C:\Workbuddy\Spider_XHS"
 
 DATA_DIR = os.path.join(BASE_DIR, "data")
 DB_PATH = os.path.join(DATA_DIR, "xhs_admin.db")

@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
+<meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>小红书博主监控后台</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/element-plus@2.9.1/dist/index.css">
@@ -152,8 +153,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
                 <template #default="{row}"><el-tag :type="statusType(row.status)">{{statusText(row.status)}}</el-tag></template>
               </el-table-column>
               <el-table-column prop="last_checked_at" label="最近检测" min-width="150"></el-table-column>
-              <el-table-column label="操作" width="150">
+              <el-table-column label="操作" width="215">
                 <template #default="{row}">
+                  <el-button size="small" link type="warning" @click="openUpdateCookie(row)"><el-icon><refresh></refresh></el-icon>更新</el-button>
                   <el-button size="small" link type="primary" @click="checkAccount(row)"><el-icon><search></search></el-icon>检测</el-button>
                   <el-button size="small" link type="danger" @click="deleteAccount(row)"><el-icon><delete></delete></el-icon>删除</el-button>
                 </template>
@@ -282,7 +284,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
   </el-container>
 
   <!-- 添加账号弹窗 -->
-  <el-dialog v-model="accountDialogVisible" title="添加小红书账号" width="560px" @close="resetAccountDialog">
+  <el-dialog v-model="accountDialogVisible" :title="cookieUpdateId ? '更新账号登录态' : '添加小红书账号'" width="560px" @close="resetAccountDialog">
     <el-tabs v-model="accountTab">
       <el-tab-pane label="扫码登录" name="qrcode">
         <el-alert type="warning" :closable="false" show-icon style="margin-bottom:14px">
@@ -326,11 +328,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
       </el-tab-pane>
 
       <el-tab-pane label="Cookie 导入" name="cookie">
+        <el-alert v-if="cookieUpdateId" type="info" :closable="false" show-icon style="margin-bottom:14px">
+          <template #title>正在更新已有账号的登录态</template>
+          <div style="font-size:12px;line-height:1.7">粘贴新的 Cookie 后点保存，校验通过即替换原账号登录态；校验不通过则保持原值不变。</div>
+        </el-alert>
         <el-form label-width="80px">
-          <el-form-item label="账号名"><el-input v-model="accountForm.name" placeholder="可选，留空自动用昵称"></el-input></el-form-item>
+          <el-form-item v-if="!cookieUpdateId" label="账号名"><el-input v-model="accountForm.name" placeholder="可选，留空自动用昵称"></el-input></el-form-item>
           <el-form-item label="Cookie"><el-input v-model="accountForm.cookie" type="textarea" :rows="7" placeholder="浏览器登录后完整复制 Cookie 粘贴到这里"></el-input></el-form-item>
         </el-form>
-        <el-button type="danger" style="width:100%" :loading="saving" @click="saveAccount">保存并检测</el-button>
+        <el-button type="danger" style="width:100%" :loading="saving" @click="saveAccount">{{ cookieUpdateId ? '保存并更新登录态' : '保存并检测' }}</el-button>
       </el-tab-pane>
 
       <el-tab-pane label="浏览器登录" name="browser">
@@ -339,6 +345,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
             <template #title>推荐方式（最可靠）</template>
             <div style="font-size:12px;line-height:1.7">
               登录接口对服务器直连有风控（扫码最后一步会失败、短信可能收不到）。此方式会打开一个独立 Chrome 窗口，你在里面扫码或用手机验证码登录，平台自动读取登录态并添加账号。
+              <div v-if="cookieUpdateId" style="color:#e6a23c;margin-top:4px">当前为更新模式：登录哪个小红书号，就刷新哪个已有账号的登录态；若登录了其他新账号则会新加一条。</div>
             </div>
           </el-alert>
           <div style="text-align:center;padding:6px 0">
@@ -442,6 +449,7 @@ const app = Vue.createApp({
       accounts: [],
       accountDialogVisible: false,
       accountTab: 'cookie',
+      cookieUpdateId: null,
       accountForm: { name: '', cookie: '' },
       browserLoading: false,
       browserRunning: false,
@@ -555,6 +563,14 @@ const app = Vue.createApp({
     /* 账号 */
     async loadAccounts() { const d = await this.api('/api/accounts'); this.accounts = d.items || []; },
     openAccountDialog() {
+      this.cookieUpdateId = null;
+      this.accountDialogVisible = true;
+      this.refreshBrowserState();
+    },
+    openUpdateCookie(row) {
+      this.cookieUpdateId = row.id;
+      this.accountForm = { name: row.name, cookie: '' };
+      this.accountTab = 'browser';
       this.accountDialogVisible = true;
       this.refreshBrowserState();
     },
@@ -637,6 +653,7 @@ const app = Vue.createApp({
       this.phoneSessionId = '';
       this.accountForm = { name: '', cookie: '' };
       this.accountTab = 'cookie';
+      this.cookieUpdateId = null;
     },
     stopQrPolling() {
       if (this.qrTimer) { clearInterval(this.qrTimer); this.qrTimer = null; }
@@ -721,9 +738,15 @@ const app = Vue.createApp({
       if (!this.accountForm.cookie.trim()) { ElMessage.warning('请粘贴 Cookie'); return; }
       this.saving = true;
       try {
-        const d = await this.api('/api/accounts', 'POST', this.accountForm);
-        if (d.ok) { this.accountDialogVisible = false; this.accountForm = { name:'', cookie:'' }; ElMessage.success('账号添加成功：' + d.item.nickname); this.loadAccounts(); }
-        else ElMessage.error('登录态无效：' + (d.error || ''));
+        if (this.cookieUpdateId) {
+          const d = await this.api('/api/accounts/' + this.cookieUpdateId, 'PUT', { cookie: this.accountForm.cookie });
+          if (d.ok) { this.accountDialogVisible = false; this.accountForm = { name:'', cookie:'' }; ElMessage.success('登录态已更新：' + d.item.nickname); this.loadAccounts(); }
+          else ElMessage.error('Cookie 无效，未更新：' + (d.error || ''));
+        } else {
+          const d = await this.api('/api/accounts', 'POST', this.accountForm);
+          if (d.ok) { this.accountDialogVisible = false; this.accountForm = { name:'', cookie:'' }; ElMessage.success('账号添加成功：' + d.item.nickname); this.loadAccounts(); }
+          else ElMessage.error('登录态无效：' + (d.error || ''));
+        }
       } finally { this.saving = false; }
     },
     async checkAccount(row) {

@@ -6,12 +6,38 @@ from datetime import datetime
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+import covers
 import notifier
 from db import Account, Blogger, Note, SessionLocal
 from xhs_client import fetch_notes_page, normalize_note
 
 # 调度器每轮最多抓取的博主数（错峰限流，避免一次抓几十个触发风控）
 MAX_PER_ROUND = 3
+
+# 账号登录过期告警：同一账号 6 小时内最多提醒一次
+_EXPIRY_ALERT_INTERVAL = 6 * 3600
+_EXPIRY_KEYWORDS = ("登录已过期", "未登录", "登录态无效", "登录态失效", "登录信息")
+_last_expiry_alert = {}  # account_id -> unix ts
+
+
+def _alert_account_expiry(db, account, blogger_name: str) -> None:
+    """账号 Cookie 失效时推送告警（跨渠道，带时间窗去重）。"""
+    import time as _time
+    now = _time.time()
+    if now - _last_expiry_alert.get(account.id, 0) < _EXPIRY_ALERT_INTERVAL:
+        return
+    _last_expiry_alert[account.id] = now
+    title = "⚠️ 小红书账号登录已过期，监控暂停"
+    content = (
+        f"账号「{account.name}」的 Cookie 已失效，该账号下的博主监控暂停。\n\n"
+        f"最近受影响博主：{blogger_name}\n"
+        f"恢复方法：打开监控后台 → 账号管理 → 点该账号的「更新」→ 浏览器登录一次。\n"
+        f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+    try:
+        notifier.notify_custom(notifier.get_config(db), title, content)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _get_baseline(blogger: Blogger) -> list:
@@ -46,6 +72,9 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False) ->
     if not ok:
         blogger.last_error = error or "抓取失败"
         db.commit()
+        # 登录过期类错误：推送告警（去重），提醒用户及时续命
+        if account and any(k in (error or "") for k in _EXPIRY_KEYWORDS):
+            _alert_account_expiry(db, account, blogger.name)
         return {"ok": False, "error": error or "抓取失败"}
 
     normalized = [
@@ -64,11 +93,17 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False) ->
         new_notes = [n for n in normalized if n["note_id"] not in known]
 
     for n in new_notes:
+        # 封面本地化：CDN 链接带时效签名会过期，入库时立即下载（失败保留原链接）
+        local_cover = None
+        try:
+            local_cover = covers.download_cover(n["note_id"], n["cover_url"])
+        except Exception:  # noqa: BLE001
+            local_cover = None
         db.add(Note(
             blogger_id=blogger.id,
             note_id=n["note_id"],
             title=n["title"],
-            cover_url=n["cover_url"],
+            cover_url=local_cover or n["cover_url"],
             note_url=n["note_url"],
             publish_time=n["publish_time"],
             liked_count=n["liked_count"],
@@ -76,6 +111,29 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False) ->
 
     _set_baseline(blogger, current_ids)
     blogger.last_error = ""
+
+    # 顺带回填：出现在本次列表里、但封面尚未本地化的存量笔记
+    # （旧入库时未本地化，CDN 链接过期后 403；趁还有新鲜链接时补下载）
+    try:
+        existing_rows = {
+            row.note_id: row
+            for row in db.query(Note).filter(Note.blogger_id == blogger.id).all()
+            if not (row.cover_url or "").startswith("/covers/")
+        }
+        for n in normalized:
+            row = existing_rows.get(n["note_id"])
+            if row is None or not n.get("cover_url"):
+                continue
+            local = None
+            try:
+                local = covers.download_cover(n["note_id"], n["cover_url"])
+            except Exception:  # noqa: BLE001
+                local = None
+            if local:
+                row.cover_url = local
+    except Exception:  # noqa: BLE001  # 回填失败不影响主流程
+        pass
+
     db.commit()
 
     # 新笔记推送（失败不影响抓取结果）
