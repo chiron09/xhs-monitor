@@ -20,9 +20,11 @@
     用户令牌 -> CreateEnvironmentBlock 构造用户环境 -> CreateProcessAsUserW
     在用户桌面（winsta0\\default）拉起 Chrome。前台手动运行时保持原 Popen。
 """
+import base64
 import json
 import os
 import subprocess
+import threading
 import time
 import urllib.request
 
@@ -44,7 +46,15 @@ LOGIN_URL = "https://www.xiaohongshu.com/login"
 PROFILE_DIR = os.path.join(DATA_DIR, "chrome_profile")
 PIDFILE = os.path.join(DATA_DIR, "browser_login.pid")
 
-_state: dict = {"proc": None, "pid": None, "started_at": 0.0, "account": None}
+# 内嵌模式（默认开）：Chrome 无头运行，画面经 CDP 截图流式投到网页上，
+# 点击/滚动/文字输入经 CDP 注回。环境变量 XHS_LOGIN_HEADLESS=0 可退回
+# 「弹本地窗口」的旧行为（服务模式下走跨会话启动）。
+HEADLESS = os.environ.get("XHS_LOGIN_HEADLESS", "1") != "0"
+VIEWPORT = (1280, 800)
+
+_state: dict = {"proc": None, "pid": None, "started_at": 0.0, "account": None,
+                "checked_ws": None, "checked_ok": False, "checked_msg": "",
+                "checking": False, "check_lock": threading.Lock()}
 
 # ---- 跨会话启动相关常量 ----
 _CREATE_UNICODE_ENVIRONMENT = 0x00000400
@@ -366,6 +376,127 @@ def cookies_to_str(cookies: dict) -> str:
     return "; ".join(f"{k}={v}" for k, v in cookies.items())
 
 
+FALLBACK_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36")
+UA_CACHE = os.path.join(DATA_DIR, "chrome_ua.txt")
+
+STEALTH_SCRIPT = """
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh', 'en']});
+Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
+Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
+Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+if (!window.chrome) {
+  window.chrome = {runtime: {}, app: {isInstalled: false}, csi: function(){}, loadTimes: function(){}};
+}
+if (navigator.permissions && navigator.permissions.query) {
+  const _q = navigator.permissions.query.bind(navigator.permissions);
+  navigator.permissions.query = (p) => (
+    p && p.name === 'notifications'
+      ? Promise.resolve({state: Notification.permission})
+      : _q(p));
+}
+try { delete window.__nightmare; } catch (e) {}
+"""
+
+RISK_MARKERS = ("website-login/error", "error_code=300012", "captcha", "verify")
+
+
+def _load_cached_ua() -> str:
+    try:
+        with open(UA_CACHE, encoding="utf-8") as f:
+            ua = f.read().strip()
+        if ua and "HeadlessChrome" not in ua:
+            return ua
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
+def _save_cached_ua(ua: str) -> None:
+    try:
+        with open(UA_CACHE, "w", encoding="utf-8") as f:
+            f.write(ua)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _headless_ua() -> str:
+    """读取无头实例的真实 UA 并把 HeadlessChrome 换成正常 Chrome。
+
+    小红书按 UA 识别无头浏览器并弹 300012「安全限制/IP 存在风险」页，
+    必须用正常 Chrome UA 才能进登录页。
+    """
+    try:
+        v = _http_json(_debug_url("/json/version"), timeout=3.0)
+        ua = str(v.get("User-Agent") or "")
+        if "HeadlessChrome/" in ua:
+            return ua.replace("HeadlessChrome/", "Chrome/")
+        return ua or FALLBACK_UA
+    except Exception:  # noqa: BLE001
+        return FALLBACK_UA
+
+
+def _probe_ua(chrome: str) -> str:
+    """用一次性实例探测本机 Chrome 的正常 UA（把 HeadlessChrome 换成 Chrome）。
+
+    Chrome 只有在真正跑起来后 /json/version 才报出带版本号的 UA，
+    所以先空跑一次拿到 UA，再用 --user-agent 正式启动 —— 命令行层面的
+    UA 是全局生效的，比 CDP 会话级 setUserAgentOverride 可靠（后者在
+    ws 断开后就不作数了）。
+    """
+    ua = ""
+    proc = None
+    try:
+        os.makedirs(PROFILE_DIR, exist_ok=True)
+    except Exception:  # noqa: BLE001
+        pass
+    args = [
+        chrome,
+        f"--remote-debugging-port={DEBUG_PORT}",
+        "--remote-allow-origins=*",
+        f"--user-data-dir={PROFILE_DIR}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--headless=new",
+        "about:blank",
+    ]
+    try:
+        proc = subprocess.Popen(  # noqa: S603
+            args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+        for _ in range(40):  # 最多 20 秒
+            time.sleep(0.5)
+            try:
+                v = _http_json(_debug_url("/json/version"), timeout=2.0)
+                raw = str(v.get("User-Agent") or "")
+                if raw:
+                    ua = raw.replace("HeadlessChrome/", "Chrome/")
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        if proc is not None:
+            try:
+                subprocess.run(  # noqa: S603
+                    ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            except Exception:  # noqa: BLE001
+                pass
+    return ua
+
+
+def _wipe_profile() -> None:
+    """清空登录用浏览器 profile（去掉上一次被风控打标的 cookie/本地存储）。"""
+    import shutil
+
+    try:
+        shutil.rmtree(PROFILE_DIR, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def start():
     """启动（或复用）登录用浏览器。返回 (ok, message)。"""
     if is_running():
@@ -373,6 +504,8 @@ def start():
             pid = _read_pid()
             if pid and _pid_is_chrome(pid):
                 _state["pid"] = pid
+        if HEADLESS:
+            return True, "登录页已就绪，请在页面内直接操作"
         return True, "浏览器窗口已打开，请在其中完成登录"
     chrome = _chrome_path()
     if not chrome:
@@ -383,6 +516,12 @@ def start():
         return False, f"创建浏览器数据目录失败：{e}"
 
     _state["account"] = None
+    _state["checked_ok"] = False
+    _state["checked_msg"] = ""
+    _state["checked_ws"] = None
+    if HEADLESS:
+        return _start_headless(chrome)
+
     args = [
         chrome,
         f"--remote-debugging-port={DEBUG_PORT}",
@@ -394,7 +533,6 @@ def start():
         "--window-size=1120,800",
         LOGIN_URL,
     ]
-
     cur_session = _current_session_id()
     if cur_session > 0:
         # 前台手动运行（当前进程就在用户会话里）→ 普通启动即可
@@ -427,6 +565,164 @@ def start():
     return False, "浏览器启动超时，请重试"
 
 
+def _launch_headless(chrome: str, ua: str) -> tuple[bool, str]:
+    """带正常 UA 启动无头实例并等待调试端口就绪。"""
+    try:
+        os.makedirs(PROFILE_DIR, exist_ok=True)
+    except Exception as e:  # noqa: BLE001
+        return False, f"创建浏览器数据目录失败：{e}"
+    args = [
+        chrome,
+        f"--remote-debugging-port={DEBUG_PORT}",
+        "--remote-allow-origins=*",
+        f"--user-data-dir={PROFILE_DIR}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        # 无头内嵌：服务里直接跑（Session 0 无妨），画面走 CDP 投到网页
+        "--headless=new",
+        f"--window-size={VIEWPORT[0]},{VIEWPORT[1]}",
+        "--hide-scrollbars",
+        "--mute-audio",
+        # 去自动化特征（小红书会查 navigator.webdriver / UA）
+        "--disable-blink-features=AutomationControlled",
+        # 关键：命令行级 UA。无头默认 UA 带 HeadlessChrome/ 会被判风控
+        f"--user-agent={ua}",
+        "--lang=zh-CN",
+        "--accept-lang=zh-CN,zh;q=0.9",
+        LOGIN_URL,
+    ]
+    try:
+        _state["proc"] = subprocess.Popen(  # noqa: S603
+            args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
+        _state["pid"] = _state["proc"].pid
+    except Exception as e:  # noqa: BLE001
+        return False, f"启动浏览器失败：{e}"
+    _write_pid(_state["pid"])
+    _state["started_at"] = time.time()
+    for _ in range(60):  # 最多 30 秒
+        if is_running():
+            return True, ""
+        time.sleep(0.5)
+    return False, "浏览器启动超时，请重试"
+
+
+def _current_page_url() -> str:
+    target = _pick_page_target()
+    return str((target or {}).get("url") or "")
+
+
+def _wait_settled(timeout: float = 8.0) -> str:
+    """等待登录页导航落地，返回最终 URL（用于判断是否被风控页拦下）。"""
+    deadline = time.time() + timeout
+    url = ""
+    while time.time() < deadline:
+        cur = _current_page_url()
+        if cur:
+            url = cur
+            if any(m in url for m in RISK_MARKERS) or "xiaohongshu.com/login" in url:
+                return url
+        time.sleep(0.5)
+    return url
+
+
+def _start_headless(chrome: str) -> tuple[bool, str]:
+    """内嵌模式启动：先探 UA -> 正式启动 -> 撞风控页则换干净身份重试一次。"""
+    ua = _load_cached_ua()
+    if not ua:
+        ua = _probe_ua(chrome) or FALLBACK_UA
+        _save_cached_ua(ua)
+        time.sleep(1.0)  # 等探测实例彻底退出、端口释放
+
+    ok, msg = _launch_headless(chrome, ua)
+    if not ok:
+        return False, msg
+    url = _wait_settled()
+
+    if any(m in url for m in RISK_MARKERS):
+        # 上一次留下来的风控 cookie/指纹把这次也带偏了 —— 换干净身份重来
+        stop()
+        time.sleep(1.0)
+        _wipe_profile()
+        ok, msg = _launch_headless(chrome, ua)
+        if not ok:
+            return False, msg
+        url = _wait_settled()
+
+    _apply_headless_stealth()
+    if any(m in url for m in RISK_MARKERS):
+        return True, ("小红书风控拦截（页面提示 IP/环境存在风险）。已尝试换干净身份重试，"
+                      "若仍如此，说明当前网络出口被小红书标记，建议改用「Cookie 导入」方式。")
+    return True, "登录页已就绪，请在页面内直接操作"
+
+
+def _apply_headless_stealth() -> None:
+    """无头模式反检测：UA/语言头 + 抹掉 navigator.webdriver 等自动化特征。
+
+    注意必须在「页面级」ws 上做 —— 浏览器级 ws 上 Page.* 不生效。
+    UA 本身已由命令行 --user-agent 全局设定，这里只补请求头和脚本。
+    """
+    ws_url = _page_ws_url()
+    if not ws_url:
+        return
+    ua = _load_cached_ua() or FALLBACK_UA
+    ws = None
+    try:
+        ws = _cdp_connect(ws_url)
+        try:
+            _cdp(ws, "Network.enable", msg_id=5)
+            _cdp(ws, "Network.setUserAgentOverride", {
+                "userAgent": ua,
+                "acceptLanguage": "zh-CN,zh;q=0.9",
+                "platform": "Win32",
+            }, msg_id=6)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _cdp(ws, "Page.enable", msg_id=7)
+            _cdp(ws, "Page.addScriptToEvaluateOnNewDocument",
+                 {"source": STEALTH_SCRIPT}, msg_id=8)
+        except Exception:  # noqa: BLE001
+            pass
+    except Exception:  # noqa: BLE001
+        return
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+    # 反检测脚本只对之后的导航生效，重新导航一次让登录页带上干净指纹
+    _reload_login_page()
+    time.sleep(1.5)
+
+
+def _browser_ws_url() -> str | None:
+    try:
+        v = _http_json(_debug_url("/json/version"), timeout=3.0)
+        return v.get("webSocketDebuggerUrl")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _reload_login_page() -> None:
+    ws_url = _page_ws_url()
+    if not ws_url:
+        return
+    ws = None
+    try:
+        ws = _cdp_connect(ws_url)
+        _cdp(ws, "Page.enable", msg_id=1)
+        _cdp(ws, "Page.navigate", {"url": LOGIN_URL}, msg_id=2)
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def stop() -> None:
     """关闭我们启动的浏览器实例（用进程树，不动用户自己的 Chrome）。"""
     candidates: list[int] = []
@@ -447,6 +743,119 @@ def stop() -> None:
         pass
 
 
+# ================= 无头内嵌：画面截图 + 输入注入 =================
+
+def _page_ws_url() -> str | None:
+    target = _pick_page_target()
+    if not target:
+        return None
+    return target.get("webSocketDebuggerUrl")
+
+
+def snapshot() -> tuple[bool, str, int, int]:
+    """抓取当前登录页画面。返回 (ok, data_url, width, height)。"""
+    if not is_running():
+        return False, "", 0, 0
+    ws_url = _page_ws_url()
+    if not ws_url:
+        return False, "", 0, 0
+    ws = None
+    try:
+        ws = _cdp_connect(ws_url)
+        _cdp(ws, "Page.enable")
+        shot = _cdp(ws, "Page.captureScreenshot", {"format": "jpeg", "quality": 60}, msg_id=3)
+        data = (shot.get("result") or {}).get("data") or ""
+        if not data:
+            # 截图失败时把 CDP 错误带出来，便于诊断
+            err = shot.get("error") or {}
+            raise RuntimeError(f"captureScreenshot 失败: {err.get('message') or err}")
+        metrics = _cdp(ws, "Page.getLayoutMetrics", msg_id=4)
+        css = (metrics.get("result") or {}).get("cssContentSize") or {}
+        return (True, "data:image/jpeg;base64," + data,
+                int(css.get("width") or 0), int(css.get("height") or 0))
+    except Exception as e:  # noqa: BLE001
+        _state["frame_error"] = str(e)
+        return False, "", 0, 0
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _mouse_button_cdp(button: str) -> str:
+    return {"left": "left", "middle": "middle", "right": "right"}.get(button, "left")
+
+
+def inject_input(events: list) -> dict:
+    """把网页上采集的输入事件经 CDP 注入无头浏览器。
+
+    事件类型：
+      {type:'mouse', action:'pressed'|'released'|'moved', x, y, button}
+      {type:'wheel', x, y, dx, dy}
+      {type:'key', code, key, text, modifiers}
+      {type:'char', text}
+    """
+    if not is_running():
+        return {"ok": False, "error": "浏览器未运行"}
+    ws_url = _page_ws_url()
+    if not ws_url:
+        return {"ok": False, "error": "登录页不可用"}
+    sent = 0
+    ws = None
+    try:
+        ws = _cdp_connect(ws_url)
+        mid = 10
+        for ev in events:
+            try:
+                if ev.get("type") == "mouse":
+                    x = max(0, int(ev.get("x") or 0))
+                    y = max(0, int(ev.get("y") or 0))
+                    btn = _mouse_button_cdp(str(ev.get("button") or "left"))
+                    action = ev.get("action")
+                    if action == "moved":
+                        params = {"type": "mouseMoved", "x": x, "y": y, "button": btn}
+                    else:
+                        params = {"type": "mousePressed" if action == "pressed" else "mouseReleased",
+                                  "x": x, "y": y, "button": btn,
+                                  "clickCount": int(ev.get("clickCount") or 1)}
+                    _cdp(ws, "Input.dispatchMouseEvent", params, msg_id=mid)
+                elif ev.get("type") == "wheel":
+                    _cdp(ws, "Input.dispatchMouseEvent", {
+                        "type": "mouseWheel", "x": int(ev.get("x") or 0), "y": int(ev.get("y") or 0),
+                        "deltaX": int(ev.get("dx") or 0), "deltaY": int(ev.get("dy") or 0)}, msg_id=mid)
+                elif ev.get("type") == "key":
+                    # 修饰键/控制键：down=True 发 keyDown，False 发 keyUp
+                    mods = int(ev.get("modifiers") or 0)
+                    text = ev.get("text") or ""
+                    is_down = bool(ev.get("down", True))
+                    params = {"type": "keyDown" if is_down else "keyUp", "modifiers": mods,
+                              "windowsVirtualKeyCode": int(ev.get("keyCode") or 0),
+                              "code": ev.get("code") or "", "key": ev.get("key") or ""}
+                    if text and is_down:
+                        params["text"] = text
+                    _cdp(ws, "Input.dispatchKeyEvent", params, msg_id=mid)
+                elif ev.get("type") == "char":
+                    _cdp(ws, "Input.dispatchKeyEvent", {
+                        "type": "char", "text": str(ev.get("text") or "")}, msg_id=mid)
+                else:
+                    continue
+                sent += 1
+            except Exception:  # noqa: BLE001
+                continue
+            mid += 1
+        return {"ok": sent > 0, "sent": sent}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def set_account(account: dict) -> None:
     """记录已入库的账号，避免轮询重复建号。"""
     _state["account"] = account
@@ -457,6 +866,12 @@ def status() -> dict:
 
     返回 {running, logged_in, nickname, user_id, cookie, account, message}
     cookie 仅在首次检测到已登录时返回一次（由调用方入库后即不再返回）。
+
+    校验去重（关键）：SDK 的 check_cookie 要跑完整签名流程（约 5-10 秒），
+    而前端每 2-3 秒轮询一次。若每次轮询都同步校验，请求会堆积拖垮页面
+    （症状就是「登录成功后无反应」）。因此：
+      - 同一个 web_session 只校验一次，结果缓存（checked_ws/checked_ok）
+      - 校验进行中时其他轮询立即返回「校验中」，不再发起新校验
     """
     if _state.get("account"):
         return {"running": is_running(), "logged_in": True, "nickname": "", "user_id": "",
@@ -467,22 +882,56 @@ def status() -> dict:
                 "cookie": "", "account": None, "message": "浏览器未打开"}
 
     cookies = read_cookies()
-    if not cookies or not cookies.get("web_session"):
+    ws = cookies.get("web_session") or ""
+    if not cookies or not ws:
         return {"running": True, "logged_in": False, "nickname": "", "user_id": "",
                 "cookie": "", "account": None, "message": "等待登录中…"}
 
-    cookie_str = cookies_to_str(cookies)
-    import xhs_client  # 延迟导入，避免模块循环
+    # 已有缓存结果：直接返回（cookie 串按需重拼，不重复校验）
+    lock = _state["check_lock"]
+    if ws == _state.get("checked_ws") and _state.get("checked_msg"):
+        return {"running": True, "logged_in": bool(_state.get("checked_ok")),
+                "nickname": _state.get("checked_nick", "") if _state.get("checked_ok") else "",
+                "user_id": _state.get("checked_uid", "") if _state.get("checked_ok") else "",
+                "cookie": cookies_to_str(cookies) if _state.get("checked_ok") else "",
+                "account": None, "message": _state["checked_msg"]}
 
-    ok, nickname, uid, err = xhs_client.check_cookie(cookie_str)
-    if ok:
-        return {"running": True, "logged_in": True, "nickname": nickname, "user_id": uid,
-                "cookie": cookie_str, "account": None, "message": "登录成功"}
-    # 已检测到登录，但本地校验失败：如实反馈（不能谎报"等待登录中…"，
-    # 否则用户已登录成功却看到页面毫无进展）。
+    # 校验进行中：立即返回，让前端下一轮再取结果
+    if _state.get("checking"):
+        return {"running": True, "logged_in": False, "nickname": "", "user_id": "",
+                "cookie": "", "account": None, "message": "已检测到登录，正在校验…"}
+
+    def _worker():
+        try:
+            import xhs_client  # 延迟导入，避免模块循环
+            ok, nickname, uid, err = xhs_client.check_cookie(cookies_to_str(cookies))
+            _state["checked_ws"] = ws
+            _state["checked_ok"] = bool(ok)
+            _state["checked_nick"] = nickname
+            _state["checked_uid"] = uid
+            if ok:
+                _state["checked_msg"] = "登录成功"
+            elif "游客" in (err or ""):
+                # 小红书给游客也发 web_session cookie，别把游客态说成「校验未通过」
+                _state["checked_msg"] = "等待登录中…"
+            else:
+                _state["checked_msg"] = "已检测到浏览器登录，但校验未通过：" + (err or "未知原因")
+        except Exception as e:  # noqa: BLE001
+            _state["checked_ws"] = ws
+            _state["checked_ok"] = False
+            _state["checked_msg"] = "校验异常：" + str(e)
+        finally:
+            _state["checking"] = False
+
+    with lock:
+        if _state.get("checking"):  # double-check
+            return {"running": True, "logged_in": False, "nickname": "", "user_id": "",
+                    "cookie": "", "account": None, "message": "已检测到登录，正在校验…"}
+        _state["checking"] = True
+    t = threading.Thread(target=_worker, daemon=True)
+    t.start()
     return {"running": True, "logged_in": False, "nickname": "", "user_id": "",
-            "cookie": "", "account": None,
-            "message": "已检测到浏览器登录，但校验未通过：" + (err or "未知原因")}
+            "cookie": "", "account": None, "message": "已检测到登录，正在校验…"}
 
 
 def cleanup_profile() -> bool:

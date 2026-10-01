@@ -2,6 +2,7 @@
 """小红书博主监控管理后台 —— FastAPI 主应用。"""
 import os
 import secrets
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -259,14 +260,32 @@ def update_account_cookie(account_id: int, req: CookieUpdate, _=Depends(require_
 @app.post("/api/accounts/browser/start")
 def browser_login_start(_=Depends(require_auth)):
     ok, message = browser_login.start()
-    return {"ok": ok, "message": message}
+    return {"ok": ok, "message": message, "embedded": bool(browser_login.HEADLESS)}
+
+
+@app.get("/api/accounts/browser/frame")
+def browser_login_frame(_=Depends(require_auth)):
+    """内嵌模式：抓取登录页当前画面（JPEG dataURL）。"""
+    ok, data, w, h = browser_login.snapshot()
+    return {"ok": ok, "image": data, "width": w, "height": h}
+
+
+class BrowserInputRequest(BaseModel):
+    events: list[dict] = Field(default_factory=list)
+
+
+@app.post("/api/accounts/browser/input")
+def browser_login_input(req: BrowserInputRequest, _=Depends(require_auth)):
+    """内嵌模式：把网页上采集的输入事件注入无头浏览器。"""
+    return browser_login.inject_input(req.events[:200])
 
 
 @app.get("/api/accounts/browser/status")
 def browser_login_status(name: str = "", _=Depends(require_auth)):
     result = browser_login.status()
     if result.get("logged_in") and result.get("cookie") and not result.get("account"):
-        saved = _persist_account(result.pop("cookie", ""), name)
+        cookie = result.pop("cookie")
+        saved = _persist_account(cookie, name)
         if saved.get("ok") and saved.get("item"):
             browser_login.set_account(saved["item"])
             result["account"] = saved["item"]
@@ -287,6 +306,50 @@ def browser_login_stop(_=Depends(require_auth)):
 
 
 # ---- 扫码登录 ----
+def _persist_async(cookie: str, name: str, on_done) -> None:
+    """后台线程校验入库（SDK 校验要 5-10 秒，不能堵轮询请求）。"""
+    def _run():
+        try:
+            on_done(_persist_account(cookie, name))
+        except Exception:  # noqa: BLE001
+            pass
+    threading.Thread(target=_run, daemon=True).start()
+
+
+# 扫码/手机登录会话的入库结果缓存：session_id -> {status, message, account}
+# （校验在后台线程跑，轮询接口立即返回；前端下一轮轮询时取到结果）
+_persist_results: dict = {}
+_persist_lock = threading.Lock()
+
+
+def _persist_latched(session_id: str, kind: str, cookie: str, name: str, when_done=None):
+    """确保同一登录会话只入库一次。立即返回；结果写进 _persist_results。"""
+    with _persist_lock:
+        if session_id in _persist_results:
+            return _persist_results[session_id]
+        _persist_results[session_id] = {"status": "pending", "message": "正在校验登录态…", "account": None}
+
+    def _done(saved: dict):
+        entry = {
+            "status": "ok" if saved.get("ok") else "failed",
+            "message": ("登录成功，账号已添加" if not saved.get("updated")
+                        else "登录成功，已更新原账号的登录态") if saved.get("ok")
+                       else "已登录，但账号校验未通过：" + (saved.get("error") or "未知原因"),
+            "account": saved.get("item"),
+            "error": saved.get("error", ""),
+        }
+        with _persist_lock:
+            _persist_results[session_id] = entry
+        if when_done:
+            try:
+                when_done(saved, entry)
+            except Exception:  # noqa: BLE001
+                pass
+
+    _persist_async(cookie, name, _done)
+    return _persist_results[session_id]
+
+
 @app.post("/api/accounts/qrcode/start")
 def start_qrcode_login(_=Depends(require_auth)):
     ok, session_id, qr_image, err = xhs_client.start_qrcode_login()
@@ -297,13 +360,26 @@ def start_qrcode_login(_=Depends(require_auth)):
 def poll_qrcode_login(session_id: str, name: str = "", _=Depends(require_auth)):
     result = xhs_client.poll_qrcode_login(session_id)
     if result["status"] == "confirmed" and not result.get("account"):
-        cookie = xhs_client.session_cookie(session_id, "qrcode")
-        saved = _persist_account(cookie, name)
-        xhs_client.attach_session_account(session_id, saved["item"], "qrcode")
-        result["account"] = saved["item"]
-        if not saved["ok"]:
-            result["message"] = "已登录，但账号校验未通过：" + (saved["error"] or "未知原因")
-            result["error"] = saved["error"]
+        # 入库不阻塞轮询：cookie 从会话取出后丢给后台线程，结果下轮轮询取
+        with _persist_lock:
+            entry = _persist_results.get(session_id)
+        if entry is None:
+            cookie = xhs_client.session_cookie(session_id, "qrcode")
+            if cookie:
+                def _attach(saved: dict, _entry: dict):
+                    if saved.get("item"):
+                        xhs_client.attach_session_account(session_id, saved["item"], "qrcode")
+                _persist_latched(session_id, "qrcode", cookie, name, _attach)
+                result["message"] = "登录成功，正在校验登录态…"
+                result["persisting"] = True
+        else:
+            result["persisting"] = True
+            result["message"] = entry.get("message") or result["message"]
+            if entry.get("status") == "ok" and entry.get("account"):
+                result["account"] = entry["account"]
+                result["persist_done"] = True
+            elif entry.get("status") == "failed":
+                result["persist_failed"] = True
     return result
 
 
@@ -318,15 +394,27 @@ def send_phone_code(req: PhoneSendRequest, _=Depends(require_auth)):
 def verify_phone_code(req: PhoneVerifyRequest, _=Depends(require_auth)):
     ok, cookie, message = xhs_client.submit_phone_login(req.session_id, req.phone, req.code, req.zone)
     if not ok:
-        return {"ok": False, "message": message, "account": None}
-    saved = _persist_account(cookie, req.name)
-    xhs_client.attach_session_account(req.session_id, saved["item"], "phone")
+        return {"ok": False, "message": message, "account": None, "persisting": False}
+    entry = _persist_latched(req.session_id, "phone", cookie, req.name)
+    if entry.get("status") == "pending":
+        return {"ok": True, "message": "登录成功，正在校验登录态…", "account": None, "persisting": True}
     return {
-        "ok": saved["ok"],
-        "message": "登录成功" if saved["ok"] else "已登录，但账号校验未通过",
-        "error": saved["error"],
-        "account": saved["item"],
+        "ok": entry.get("status") == "ok",
+        "message": entry.get("message") or "登录成功",
+        "error": entry.get("error", ""),
+        "account": entry.get("account"),
+        "persisting": False,
     }
+
+
+@app.get("/api/accounts/phone/verify/result")
+def phone_verify_result(session_id: str, _=Depends(require_auth)):
+    """前端轮询取异步入库结果。"""
+    with _persist_lock:
+        entry = _persist_results.get(session_id)
+    if entry is None:
+        return {"status": "pending", "message": "正在校验登录态…", "account": None}
+    return entry
 
 
 @app.delete("/api/accounts/{account_id}")

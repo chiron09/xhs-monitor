@@ -324,6 +324,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
           </el-form-item>
           <el-form-item label="账号名"><el-input v-model="phoneForm.name" placeholder="可选，留空自动用昵称"></el-input></el-form-item>
           <el-button type="danger" style="width:100%" :loading="phoneLoading" @click="submitPhoneLogin">登录并添加账号</el-button>
+          <div v-if="phoneStatusText" style="margin-top:10px;font-size:13px;color:#e6a23c;text-align:center">{{ phoneStatusText }}</div>
         </el-form>
       </el-tab-pane>
 
@@ -341,17 +342,31 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
 
       <el-tab-pane label="浏览器登录" name="browser">
         <div style="padding:4px 0">
-          <el-alert type="info" :closable="false" show-icon style="margin-bottom:16px">
+          <el-alert type="info" :closable="false" show-icon style="margin-bottom:14px">
             <template #title>推荐方式（最可靠）</template>
             <div style="font-size:12px;line-height:1.7">
-              登录接口对服务器直连有风控（扫码最后一步会失败、短信可能收不到）。此方式会打开一个独立 Chrome 窗口，你在里面扫码或用手机验证码登录，平台自动读取登录态并添加账号。
+              登录页直接嵌在下方页面内（服务端无头浏览器渲染），你在画面里扫码或用手机验证码登录，平台自动读取登录态并添加账号。
               <div v-if="cookieUpdateId" style="color:#e6a23c;margin-top:4px">当前为更新模式：登录哪个小红书号，就刷新哪个已有账号的登录态；若登录了其他新账号则会新加一条。</div>
             </div>
           </el-alert>
-          <div style="text-align:center;padding:6px 0">
-            <el-button type="danger" size="large" :loading="browserLoading" @click="startBrowserLogin">{{ browserRunning ? '重新打开登录窗口' : '打开登录浏览器' }}</el-button>
-            <div :style="{marginTop:'14px',fontSize:'13px',color:browserStatusColor}">{{ browserStatusText || '点击按钮后，在弹出的浏览器窗口中完成登录' }}</div>
-            <el-button v-if="browserRunning" size="small" style="margin-top:12px" @click="stopBrowserLogin">关闭浏览器</el-button>
+          <div style="text-align:center;padding:4px 0 10px">
+            <el-button type="danger" size="large" :loading="browserLoading" @click="startBrowserLogin">{{ browserRunning ? '重新加载登录页' : '打开登录页' }}</el-button>
+            <el-button v-if="browserRunning" size="small" @click="stopBrowserLogin">关闭</el-button>
+            <div :style="{marginTop:'10px',fontSize:'13px',color:browserStatusColor}">{{ browserStatusText || '点击按钮，登录页将显示在下方画面中' }}</div>
+          </div>
+          <div v-show="browserRunning" style="position:relative;width:100%;max-width:900px;margin:0 auto;border:1px solid #dcdfe6;border-radius:8px;overflow:hidden;background:#fff">
+            <img id="loginFrame" :src="frameDataUrl" tabindex="0" @load="frameLoaded"
+                 style="display:block;width:100%;user-select:none;-webkit-user-drag:none;outline:none;cursor:text"
+                 @mousedown.prevent="frameMouse($event,'pressed')"
+                 @mouseup.prevent="frameMouse($event,'released')"
+                 @mousemove="frameMouse($event,'moved')"
+                 @wheel.prevent="frameWheel($event)"
+                 @keydown="frameKey($event, true)"
+                 @keyup="frameKey($event, false)"
+                 @contextmenu.prevent>
+            <div style="position:absolute;left:0;right:0;bottom:0;padding:6px 12px;font-size:12px;color:#8a919f;background:rgba(255,255,255,.9);border-top:1px solid #f0f0f0;text-align:center">
+              上方为服务端登录页实时画面 — 直接用鼠标点击操作（点输入框可打字，可滚动）
+            </div>
           </div>
         </div>
       </el-tab-pane>
@@ -456,6 +471,12 @@ const app = Vue.createApp({
       browserStatusText: '',
       browserStatusColor: '#8a919f',
       browserTimer: null,
+      frameDataUrl: '',
+      frameWidth: 0,
+      frameHeight: 0,
+      frameTimer: null,
+      frameBusy: false,
+      pendingEvents: [],
       qrImage: '',
       qrLoading: false,
       qrStatusText: '',
@@ -465,6 +486,7 @@ const app = Vue.createApp({
       phoneForm: { phone: '', code: '', name: '' },
       phoneSessionId: '',
       phoneLoading: false,
+      phoneStatusText: '',
       phoneCountdown: 0,
       phoneTimer: null,
       // 博主
@@ -522,6 +544,7 @@ const app = Vue.createApp({
     if (this.qrTimer) clearInterval(this.qrTimer);
     if (this.phoneTimer) clearInterval(this.phoneTimer);
     if (this.browserTimer) clearInterval(this.browserTimer);
+    this.stopFrameStream();
   },
   methods: {
     async api(path, method='GET', body) {
@@ -593,23 +616,94 @@ const app = Vue.createApp({
     },
     async startBrowserLogin() {
       this.browserLoading = true;
-      this.browserStatusText = '正在启动浏览器…';
+      this.browserStatusText = '正在启动登录页…';
       this.browserStatusColor = '#8a919f';
       try {
         const d = await this.api('/api/accounts/browser/start', 'POST');
         if (!d.ok) {
-          this.browserStatusText = d.message || '启动浏览器失败';
+          this.browserStatusText = d.message || '启动登录页失败';
           this.browserStatusColor = '#f56c6c';
           return;
         }
         this.browserRunning = true;
-        this.browserStatusText = '请在浏览器窗口中扫码或输入手机验证码…';
+        this.browserStatusText = '登录页加载中…';
         this.browserStatusColor = '#e6a23c';
+        this.startFrameStream();
         this.startBrowserPolling();
       } catch (e) {
-        this.browserStatusText = '启动浏览器失败';
+        this.browserStatusText = '启动登录页失败';
         this.browserStatusColor = '#f56c6c';
       } finally { this.browserLoading = false; }
+    },
+    // ---- 内嵌画面：截图流 + 输入转发 ----
+    startFrameStream() {
+      this.stopFrameStream();
+      this.frameTimer = setInterval(async () => {
+        if (this.frameBusy || !this.browserRunning) return;
+        this.frameBusy = true;
+        try {
+          // 攒下的输入事件随帧一起发，减少请求数
+          let events = [];
+          if (this.pendingEvents.length) {
+            events = this.pendingEvents;
+            this.pendingEvents = [];
+          }
+          if (events.length) {
+            await this.api('/api/accounts/browser/input', 'POST', { events });
+          }
+          const r = await this.api('/api/accounts/browser/frame');
+          if (r.ok && r.image) {
+            this.frameDataUrl = r.image;
+            this.frameWidth = r.width || 0;
+            this.frameHeight = r.height || 0;
+          }
+        } catch (e) { /* 网络抖动跳过本帧 */ }
+        finally { this.frameBusy = false; }
+      }, 400);
+    },
+    stopFrameStream() {
+      if (this.frameTimer) { clearInterval(this.frameTimer); this.frameTimer = null; }
+      this.frameBusy = false;
+    },
+    frameLoaded() { if (this.browserRunning) this.browserStatusText = ''; },
+    framePos(e) {
+      const img = document.getElementById('loginFrame');
+      if (!img || !this.frameWidth) return null;
+      const rect = img.getBoundingClientRect();
+      const x = Math.round((e.clientX - rect.left) * (this.frameWidth / rect.width));
+      const y = Math.round((e.clientY - rect.top) * (this.frameHeight / rect.height));
+      return { x: Math.max(0, x), y: Math.max(0, y) };
+    },
+    frameMouse(e, action) {
+      const p = this.framePos(e);
+      if (!p) return;
+      this.pendingEvents.push({ type: 'mouse', action, x: p.x, y: p.y,
+        button: e.button === 2 ? 'right' : 'left', clickCount: e.detail || 1 });
+      // 点击后立刻聚焦，让后续键盘事件生效
+      if (action === 'pressed') { try { e.currentTarget.focus && e.currentTarget.focus(); } catch (err) {} }
+    },
+    frameWheel(e) {
+      const p = this.framePos(e);
+      if (!p) return;
+      this.pendingEvents.push({ type: 'wheel', x: p.x, y: p.y,
+        dx: Math.round(e.deltaX || 0), dy: Math.round(e.deltaY || 0) });
+    },
+    frameKey(e, down) {
+      if (!this.browserRunning) return;
+      e.preventDefault();
+      let mods = 0;
+      if (e.altKey) mods |= 1;
+      if (e.ctrlKey) mods |= 2;
+      if (e.metaKey) mods |= 4;
+      if (e.shiftKey) mods |= 8;
+      // 可打印字符走 char（保证中文/符号输入正确），控制键走 keyDown/keyUp
+      if (down && e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
+        this.pendingEvents.push({ type: 'char', text: e.key });
+      } else {
+        this.pendingEvents.push({ type: 'key', down,
+          code: e.code || '', key: e.key || '', keyCode: e.keyCode || 0, modifiers: mods,
+          text: down && e.key.length === 1 ? e.key : '' });
+      }
     },
     startBrowserPolling() {
       this.stopBrowserPolling();
@@ -620,12 +714,14 @@ const app = Vue.createApp({
           this.browserStatusText = r.message || '';
           if (r.logged_in && r.account) {
             this.stopBrowserPolling();
+            this.stopFrameStream();
             this.browserStatusColor = '#67c23a';
             ElMessage.success('登录成功：' + (r.account.nickname || r.account.name));
             this.accountDialogVisible = false;
             this.loadAccounts();
           } else if (!r.running) {
             this.stopBrowserPolling();
+            this.stopFrameStream();
             this.browserStatusColor = '#8a919f';
           } else {
             this.browserStatusColor = '#e6a23c';
@@ -639,13 +735,16 @@ const app = Vue.createApp({
     async stopBrowserLogin() {
       await this.api('/api/accounts/browser/stop', 'POST');
       this.stopBrowserPolling();
+      this.stopFrameStream();
       this.browserRunning = false;
-      this.browserStatusText = '浏览器已关闭';
+      this.frameDataUrl = '';
+      this.browserStatusText = '已关闭';
       this.browserStatusColor = '#8a919f';
     },
     resetAccountDialog() {
       this.stopQrPolling();
       this.stopBrowserPolling();
+      this.stopFrameStream();
       if (this.phoneTimer) { clearInterval(this.phoneTimer); this.phoneTimer = null; }
       this.phoneCountdown = 0;
       this.qrImage = ''; this.qrSessionId = ''; this.qrStatusText = ''; this.qrStatusColor = '#8a919f';
@@ -671,7 +770,7 @@ const app = Vue.createApp({
         }
         this.qrSessionId = d.session_id;
         this.qrImage = d.qr_image;
-        this.qrStatusText = '请用小红书 App 扫码';
+        this.qrStatusText = '请用小红书 App 扫码，并在手机上点「确认登录」';
         this.startQrPolling();
       } catch (e) {
         this.qrStatusText = '二维码生成失败';
@@ -690,11 +789,20 @@ const app = Vue.createApp({
           else if (r.status === 'expired' || r.status === 'error') this.qrStatusColor = '#f56c6c';
           else this.qrStatusColor = '#8a919f';
           if (r.status === 'confirmed') {
-            this.stopQrPolling();
-            if (r.account) ElMessage.success('登录成功：' + (r.account.nickname || r.account.name));
-            else ElMessage.warning(r.message || '登录成功');
-            this.accountDialogVisible = false;
-            this.loadAccounts();
+            // 登录成功但入库校验还在后台跑：停在「校验中」，等 persist_done
+            if (r.account) {
+              this.stopQrPolling();
+              ElMessage.success('登录成功：' + (r.account.nickname || r.account.name));
+              this.accountDialogVisible = false;
+              this.loadAccounts();
+            } else if (r.persist_failed) {
+              this.stopQrPolling();
+              ElMessage.error(r.message || '登录态校验未通过');
+            } else if (!r.persisting) {
+              this.stopQrPolling();
+              ElMessage.warning(r.message || '登录成功');
+            }
+            // persisting 且无 account：保持轮询，下轮取入库结果
           } else if (r.status === 'expired' || r.status === 'error') {
             this.stopQrPolling();
           }
@@ -725,14 +833,37 @@ const app = Vue.createApp({
         const d = await this.api('/api/accounts/phone/verify', 'POST', {
           session_id: this.phoneSessionId, phone, code, zone: '86', name: this.phoneForm.name,
         });
-        if (d.ok && d.account) {
+        if (!d.ok && !d.persisting) {
+          ElMessage.error(d.message || '登录失败');
+          return;
+        }
+        if (d.account) {
           ElMessage.success('登录成功：' + (d.account.nickname || d.account.name));
           this.accountDialogVisible = false;
           this.loadAccounts();
-        } else {
-          ElMessage.error(d.message || '登录失败');
+          return;
         }
-      } finally { this.phoneLoading = false; }
+        // 登录成功、后台正在校验入库：轮询结果接口直到出结果
+        this.phoneStatusText = d.message || '登录成功，正在校验登录态…';
+        const sid = this.phoneSessionId;
+        const timer = setInterval(async () => {
+          try {
+            const r = await this.api('/api/accounts/phone/verify/result?session_id=' + encodeURIComponent(sid));
+            this.phoneStatusText = r.message || '';
+            if (r.status === 'ok' && r.account) {
+              clearInterval(timer);
+              this.phoneLoading = false;
+              ElMessage.success('登录成功：' + (r.account.nickname || r.account.name));
+              this.accountDialogVisible = false;
+              this.loadAccounts();
+            } else if (r.status === 'failed') {
+              clearInterval(timer);
+              this.phoneLoading = false;
+              ElMessage.error(r.message || '登录态校验未通过');
+            }
+          } catch (e) { /* 继续 */ }
+        }, 2000);
+      } finally { /* phoneLoading 由结果轮询负责关闭 */ }
     },
     async saveAccount() {
       if (!this.accountForm.cookie.trim()) { ElMessage.warning('请粘贴 Cookie'); return; }
