@@ -257,13 +257,39 @@ def poll_qrcode_login(session_id: str) -> dict:
     if sess.get("cookie_str"):
         return {"status": "confirmed", "message": "登录成功", "account": sess.get("account")}
 
-    try:
-        with _direct_env():
-            ok, msg, cookies = sess["api"].check_qrcode_status(sess["qr_id"], sess["code"], sess["cookies"])
-        sess["cookies"] = cookies
-    except Exception as e:  # noqa: BLE001
+    last_err = ""
+    cookies = sess.get("cookies") or {}
+    ok = False
+    msg = ""
+    # 手机点「确认登录」后到服务端落库正式 web_session 之间有一小段窗口，
+    # 首轮轮询常常拿到 code_status != 2（SDK 抛「二维码最终登录状态无效」）。
+    # 因此这里重试几次，再用轮询阶段已合并进来的 cookie 做兜底校验。
+    for _attempt in range(4):
+        try:
+            with _direct_env():
+                ok, msg, cookies = sess["api"].check_qrcode_status(sess["qr_id"], sess["code"], cookies)
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = str(e)
+            time.sleep(1.2)
+    sess["cookies"] = cookies
+
+    if not ok and last_err:
+        # 换 session 这一步失败：先用轮询阶段已合并的 cookie 判定是否已真登录
+        ck_str = XHSLoginApi.cookies_to_str(cookies)
+        if ck_str:
+            try:
+                ok2, nick, uid, err2 = check_cookie(ck_str)
+            except Exception:  # noqa: BLE001
+                ok2 = False
+            if ok2:
+                sess["cookie_str"] = ck_str
+                sess["status"] = "confirmed"
+                _safe_close(sess["api"])
+                return {"status": "confirmed", "message": "登录成功", "account": sess.get("account")}
         sess["status"] = "error"
-        return {"status": "error", "message": str(e), "account": None}
+        hint = "（建议改用「浏览器登录」页内扫码，服务器直连登录常被风控）" if "无效" in last_err else ""
+        return {"status": "error", "message": last_err + hint, "account": None}
 
     if ok:
         sess["cookie_str"] = XHSLoginApi.cookies_to_str(cookies)
