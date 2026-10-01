@@ -299,7 +299,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
           <div v-else>
             <img :src="qrImage" style="width:188px;height:188px;border:1px solid #ebeef5;border-radius:8px;padding:6px;background:#fff">
             <div :style="{marginTop:'10px',fontSize:'13px',color:qrStatusColor}">{{ qrStatusText }}</div>
-            <el-button size="small" style="margin-top:10px" :loading="qrLoading" @click="startQrcodeLogin">重新生成二维码</el-button>
+            <div style="margin-top:10px">
+              <el-button size="small" :loading="qrLoading" @click="startQrcodeLogin">重新生成二维码</el-button>
+              <el-button v-if="(qrStatusText||'').indexOf('无效') >= 0" size="small" type="success" @click="useBrowserLogin">改用浏览器登录</el-button>
+            </div>
           </div>
         </div>
       </el-tab-pane>
@@ -636,7 +639,9 @@ const app = Vue.createApp({
       this.browserStatusText = '正在读取登录态并校验…';
       this.browserStatusColor = '#e6a23c';
       try {
-        const r = await this.api('/api/accounts/browser/check', 'POST');
+        // 更新模式下传账号名，便于按名字匹配更新而非误新建
+        const name = this.cookieUpdateId ? (this.accountForm.name || '') : '';
+        const r = await this.api('/api/accounts/browser/check' + (name ? '?name=' + encodeURIComponent(name) : ''), 'POST');
         if (r.logged_in && r.account) {
           this.stopFrameStream();
           this.browserStatusColor = '#67c23a';
@@ -647,7 +652,8 @@ const app = Vue.createApp({
           this.loadAccounts();
         } else {
           this.browserStatusText = r.message || '未检测到登录';
-          this.browserStatusColor = '#f56c6c';
+          // 游客态（还没真正登录）是正常提示，不是错误
+          this.browserStatusColor = (r.message || '').indexOf('游客') >= 0 ? '#e6a23c' : '#f56c6c';
         }
       } catch (e) {
         this.browserStatusText = '校验失败，请重试';
@@ -775,6 +781,15 @@ const app = Vue.createApp({
         this.qrStatusText = '二维码生成失败';
         this.qrStatusColor = '#f56c6c';
       } finally { this.qrLoading = false; }
+    },
+    // 直连扫码被风控时，一键切到内嵌浏览器登录（最可靠）
+    useBrowserLogin() {
+      this.stopQrPolling();
+      this.qrImage = '';
+      this.qrSessionId = '';
+      this.qrStatusText = '';
+      this.accountTab = 'browser';
+      this.startBrowserLogin();
     },
     startQrPolling() {
       this.stopQrPolling();

@@ -872,8 +872,11 @@ def check() -> dict:
     """手动触发登录态校验。返回完整结果（含 cookie 供入库）。
 
     返回 {running, logged_in, nickname, user_id, cookie, account, message}
-    由用户点「完成登录」按钮时调用一次，同步执行 SDK 校验（约 5-10 秒），
-    前端用 loading 状态覆盖整个过程，不存在轮询堆积问题。
+
+    这里只做「是否已检测到登录 cookie」的轻判断（不跑 SDK 签名校验），
+    真正的校验 + 入库统一由 app.py 的 _persist_account 完成——避免 check()
+    和 _persist_account 各跑一次 check_cookie（双重校验），既拖慢又可能
+    两次结果不一致导致「登录成功但入库失败」的假象。
     """
     if _state.get("account"):
         return {"running": is_running(), "logged_in": True, "nickname": "", "user_id": "",
@@ -890,22 +893,10 @@ def check() -> dict:
                 "cookie": "", "account": None,
                 "message": "未检测到登录，请先扫码或输入验证码，再点「完成登录」"}
 
-    try:
-        import xhs_client  # 延迟导入，避免模块循环
-        ok, nickname, uid, err = xhs_client.check_cookie(cookies_to_str(cookies))
-    except Exception as e:  # noqa: BLE001
-        ok, nickname, uid, err = False, "", "", str(e)
-
-    if ok:
-        return {"running": True, "logged_in": True, "nickname": nickname, "user_id": uid,
-                "cookie": cookies_to_str(cookies), "account": None, "message": "登录成功"}
-    if "游客" in (err or ""):
-        return {"running": True, "logged_in": False, "nickname": "", "user_id": "",
-                "cookie": "", "account": None,
-                "message": "还未登录成功（游客状态），请完成扫码/验证码后再试"}
-    return {"running": True, "logged_in": False, "nickname": "", "user_id": "",
-            "cookie": "", "account": None,
-            "message": "登录态校验未通过：" + (err or "未知原因")}
+    # 已检测到 web_session cookie，交给 app.py 校验入库（含游客态判定）
+    return {"running": True, "logged_in": True, "nickname": "", "user_id": "",
+            "cookie": cookies_to_str(cookies), "account": None,
+            "message": "已检测到登录，正在校验登录态…"}
 
 
 def cleanup_profile() -> bool:

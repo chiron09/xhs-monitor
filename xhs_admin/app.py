@@ -301,8 +301,14 @@ def browser_login_check(name: str = "", _=Depends(require_auth)):
             browser_login.stop()
             result["message"] = "登录成功，已更新原账号的登录态" if saved.get("updated") else "登录成功，账号已添加"
         else:
-            result["message"] = "已检测到登录，但账号校验未通过：" + (saved.get("error") or "未知原因") + "（可关闭浏览器后重试）"
-            browser_login.stop()
+            err = saved.get("error") or "未知原因"
+            if "游客" in err:
+                # 点「完成登录」时还没真正登录（只是游客态 web_session）
+                result["logged_in"] = False
+                result["message"] = "还未登录成功（游客状态），请在页面内扫码或输入验证码后再点「完成登录」"
+            else:
+                result["message"] = "已检测到登录，但账号校验未通过：" + err + "（可关闭浏览器后重试）"
+                browser_login.stop()
     result.pop("cookie", None)
     return result
 
