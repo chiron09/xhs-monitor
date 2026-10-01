@@ -345,12 +345,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
           <el-alert type="info" :closable="false" show-icon style="margin-bottom:14px">
             <template #title>推荐方式（最可靠）</template>
             <div style="font-size:12px;line-height:1.7">
-              登录页直接嵌在下方页面内（服务端无头浏览器渲染），你在画面里扫码或用手机验证码登录，平台自动读取登录态并添加账号。
+              登录页直接嵌在下方页面内（服务端无头浏览器渲染），你在画面里扫码或用手机验证码登录，完成后点「完成登录」按钮读取登录态。
               <div v-if="cookieUpdateId" style="color:#e6a23c;margin-top:4px">当前为更新模式：登录哪个小红书号，就刷新哪个已有账号的登录态；若登录了其他新账号则会新加一条。</div>
             </div>
           </el-alert>
           <div style="text-align:center;padding:4px 0 10px">
             <el-button type="danger" size="large" :loading="browserLoading" @click="startBrowserLogin">{{ browserRunning ? '重新加载登录页' : '打开登录页' }}</el-button>
+            <el-button v-if="browserRunning && !browserChecking" type="success" size="large" :loading="browserChecking" @click="checkBrowserLogin">完成登录，读取登录态</el-button>
             <el-button v-if="browserRunning" size="small" @click="stopBrowserLogin">关闭</el-button>
             <div :style="{marginTop:'10px',fontSize:'13px',color:browserStatusColor}">{{ browserStatusText || '点击按钮，登录页将显示在下方画面中' }}</div>
           </div>
@@ -365,7 +366,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
                  @keyup="frameKey($event, false)"
                  @contextmenu.prevent>
             <div style="position:absolute;left:0;right:0;bottom:0;padding:6px 12px;font-size:12px;color:#8a919f;background:rgba(255,255,255,.9);border-top:1px solid #f0f0f0;text-align:center">
-              上方为服务端登录页实时画面 — 直接用鼠标点击操作（点输入框可打字，可滚动）
+              上方为服务端登录页实时画面 — 直接用鼠标点击操作（点输入框可打字，可滚动）；登录完成后点上方「完成登录」按钮
             </div>
           </div>
         </div>
@@ -467,6 +468,7 @@ const app = Vue.createApp({
       cookieUpdateId: null,
       accountForm: { name: '', cookie: '' },
       browserLoading: false,
+      browserChecking: false,
       browserRunning: false,
       browserStatusText: '',
       browserStatusColor: '#8a919f',
@@ -601,16 +603,10 @@ const app = Vue.createApp({
       try {
         const r = await this.api('/api/accounts/browser/status');
         this.browserRunning = !!r.running;
-        if (r.logged_in && r.account) {
-          ElMessage.success('登录成功：' + (r.account.nickname || r.account.name));
-          this.accountDialogVisible = false;
-          this.loadAccounts();
-          return;
-        }
         if (r.running) {
-          this.browserStatusText = r.message || '等待登录中…';
+          this.browserStatusText = r.message || '登录页已就绪';
           this.browserStatusColor = '#e6a23c';
-          this.startBrowserPolling();
+          this.startFrameStream();
         }
       } catch (e) { /* 忽略 */ }
     },
@@ -626,14 +622,37 @@ const app = Vue.createApp({
           return;
         }
         this.browserRunning = true;
-        this.browserStatusText = '登录页加载中…';
+        this.browserStatusText = '登录页已就绪，请扫码或输入验证码，完成后点「完成登录」';
         this.browserStatusColor = '#e6a23c';
         this.startFrameStream();
-        this.startBrowserPolling();
       } catch (e) {
         this.browserStatusText = '启动登录页失败';
         this.browserStatusColor = '#f56c6c';
       } finally { this.browserLoading = false; }
+    },
+    async checkBrowserLogin() {
+      if (this.browserChecking) return;
+      this.browserChecking = true;
+      this.browserStatusText = '正在读取登录态并校验…';
+      this.browserStatusColor = '#e6a23c';
+      try {
+        const r = await this.api('/api/accounts/browser/check', 'POST');
+        if (r.logged_in && r.account) {
+          this.stopFrameStream();
+          this.browserStatusColor = '#67c23a';
+          this.browserStatusText = r.message || '登录成功';
+          ElMessage.success('登录成功：' + (r.account.nickname || r.account.name));
+          this.accountDialogVisible = false;
+          this.browserRunning = false;
+          this.loadAccounts();
+        } else {
+          this.browserStatusText = r.message || '未检测到登录';
+          this.browserStatusColor = '#f56c6c';
+        }
+      } catch (e) {
+        this.browserStatusText = '校验失败，请重试';
+        this.browserStatusColor = '#f56c6c';
+      } finally { this.browserChecking = false; }
     },
     // ---- 内嵌画面：截图流 + 输入转发 ----
     startFrameStream() {
@@ -706,28 +725,7 @@ const app = Vue.createApp({
       }
     },
     startBrowserPolling() {
-      this.stopBrowserPolling();
-      this.browserTimer = setInterval(async () => {
-        try {
-          const r = await this.api('/api/accounts/browser/status');
-          this.browserRunning = !!r.running;
-          this.browserStatusText = r.message || '';
-          if (r.logged_in && r.account) {
-            this.stopBrowserPolling();
-            this.stopFrameStream();
-            this.browserStatusColor = '#67c23a';
-            ElMessage.success('登录成功：' + (r.account.nickname || r.account.name));
-            this.accountDialogVisible = false;
-            this.loadAccounts();
-          } else if (!r.running) {
-            this.stopBrowserPolling();
-            this.stopFrameStream();
-            this.browserStatusColor = '#8a919f';
-          } else {
-            this.browserStatusColor = '#e6a23c';
-          }
-        } catch (e) { /* 网络抖动，下一轮继续 */ }
-      }, 3000);
+      // 已废弃：登录校验改为手动触发（点「完成登录」按钮），保留空实现防引用报错
     },
     stopBrowserPolling() {
       if (this.browserTimer) { clearInterval(this.browserTimer); this.browserTimer = null; }
@@ -737,6 +735,7 @@ const app = Vue.createApp({
       this.stopBrowserPolling();
       this.stopFrameStream();
       this.browserRunning = false;
+      this.browserChecking = false;
       this.frameDataUrl = '';
       this.browserStatusText = '已关闭';
       this.browserStatusColor = '#8a919f';

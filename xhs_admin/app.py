@@ -281,8 +281,16 @@ def browser_login_input(req: BrowserInputRequest, _=Depends(require_auth)):
 
 
 @app.get("/api/accounts/browser/status")
-def browser_login_status(name: str = "", _=Depends(require_auth)):
+def browser_login_status(_=Depends(require_auth)):
+    # 轻量查询：只回 running，供前端刷新按钮状态，不触发校验
     result = browser_login.status()
+    return result
+
+
+@app.post("/api/accounts/browser/check")
+def browser_login_check(name: str = "", _=Depends(require_auth)):
+    # 手动触发登录态校验（同步，前端用 loading 覆盖 5-10 秒）
+    result = browser_login.check()
     if result.get("logged_in") and result.get("cookie") and not result.get("account"):
         cookie = result.pop("cookie")
         saved = _persist_account(cookie, name)

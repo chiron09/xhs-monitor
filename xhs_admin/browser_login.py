@@ -24,7 +24,6 @@ import base64
 import json
 import os
 import subprocess
-import threading
 import time
 import urllib.request
 
@@ -52,9 +51,7 @@ PIDFILE = os.path.join(DATA_DIR, "browser_login.pid")
 HEADLESS = os.environ.get("XHS_LOGIN_HEADLESS", "1") != "0"
 VIEWPORT = (1280, 800)
 
-_state: dict = {"proc": None, "pid": None, "started_at": 0.0, "account": None,
-                "checked_ws": None, "checked_ok": False, "checked_msg": "",
-                "checking": False, "check_lock": threading.Lock()}
+_state: dict = {"proc": None, "pid": None, "started_at": 0.0, "account": None}
 
 # ---- 跨会话启动相关常量 ----
 _CREATE_UNICODE_ENVIRONMENT = 0x00000400
@@ -516,9 +513,6 @@ def start():
         return False, f"创建浏览器数据目录失败：{e}"
 
     _state["account"] = None
-    _state["checked_ok"] = False
-    _state["checked_msg"] = ""
-    _state["checked_ws"] = None
     if HEADLESS:
         return _start_headless(chrome)
 
@@ -862,16 +856,24 @@ def set_account(account: dict) -> None:
 
 
 def status() -> dict:
-    """检查浏览器登录状态。
+    """轻量状态查询（不读 cookie、不触发校验）。
+
+    只回答「登录浏览器是否还活着」，供前端轮询刷新按钮状态。
+    真正的登录态校验由 check() 在用户点「完成登录」时手动触发。
+    """
+    if _state.get("account"):
+        return {"running": is_running(), "message": "登录成功"}
+    if not is_running():
+        return {"running": False, "message": "浏览器未打开"}
+    return {"running": True, "message": "登录页已就绪，登录完成后点「完成登录」按钮"}
+
+
+def check() -> dict:
+    """手动触发登录态校验。返回完整结果（含 cookie 供入库）。
 
     返回 {running, logged_in, nickname, user_id, cookie, account, message}
-    cookie 仅在首次检测到已登录时返回一次（由调用方入库后即不再返回）。
-
-    校验去重（关键）：SDK 的 check_cookie 要跑完整签名流程（约 5-10 秒），
-    而前端每 2-3 秒轮询一次。若每次轮询都同步校验，请求会堆积拖垮页面
-    （症状就是「登录成功后无反应」）。因此：
-      - 同一个 web_session 只校验一次，结果缓存（checked_ws/checked_ok）
-      - 校验进行中时其他轮询立即返回「校验中」，不再发起新校验
+    由用户点「完成登录」按钮时调用一次，同步执行 SDK 校验（约 5-10 秒），
+    前端用 loading 状态覆盖整个过程，不存在轮询堆积问题。
     """
     if _state.get("account"):
         return {"running": is_running(), "logged_in": True, "nickname": "", "user_id": "",
@@ -885,53 +887,25 @@ def status() -> dict:
     ws = cookies.get("web_session") or ""
     if not cookies or not ws:
         return {"running": True, "logged_in": False, "nickname": "", "user_id": "",
-                "cookie": "", "account": None, "message": "等待登录中…"}
+                "cookie": "", "account": None,
+                "message": "未检测到登录，请先扫码或输入验证码，再点「完成登录」"}
 
-    # 已有缓存结果：直接返回（cookie 串按需重拼，不重复校验）
-    lock = _state["check_lock"]
-    if ws == _state.get("checked_ws") and _state.get("checked_msg"):
-        return {"running": True, "logged_in": bool(_state.get("checked_ok")),
-                "nickname": _state.get("checked_nick", "") if _state.get("checked_ok") else "",
-                "user_id": _state.get("checked_uid", "") if _state.get("checked_ok") else "",
-                "cookie": cookies_to_str(cookies) if _state.get("checked_ok") else "",
-                "account": None, "message": _state["checked_msg"]}
+    try:
+        import xhs_client  # 延迟导入，避免模块循环
+        ok, nickname, uid, err = xhs_client.check_cookie(cookies_to_str(cookies))
+    except Exception as e:  # noqa: BLE001
+        ok, nickname, uid, err = False, "", "", str(e)
 
-    # 校验进行中：立即返回，让前端下一轮再取结果
-    if _state.get("checking"):
+    if ok:
+        return {"running": True, "logged_in": True, "nickname": nickname, "user_id": uid,
+                "cookie": cookies_to_str(cookies), "account": None, "message": "登录成功"}
+    if "游客" in (err or ""):
         return {"running": True, "logged_in": False, "nickname": "", "user_id": "",
-                "cookie": "", "account": None, "message": "已检测到登录，正在校验…"}
-
-    def _worker():
-        try:
-            import xhs_client  # 延迟导入，避免模块循环
-            ok, nickname, uid, err = xhs_client.check_cookie(cookies_to_str(cookies))
-            _state["checked_ws"] = ws
-            _state["checked_ok"] = bool(ok)
-            _state["checked_nick"] = nickname
-            _state["checked_uid"] = uid
-            if ok:
-                _state["checked_msg"] = "登录成功"
-            elif "游客" in (err or ""):
-                # 小红书给游客也发 web_session cookie，别把游客态说成「校验未通过」
-                _state["checked_msg"] = "等待登录中…"
-            else:
-                _state["checked_msg"] = "已检测到浏览器登录，但校验未通过：" + (err or "未知原因")
-        except Exception as e:  # noqa: BLE001
-            _state["checked_ws"] = ws
-            _state["checked_ok"] = False
-            _state["checked_msg"] = "校验异常：" + str(e)
-        finally:
-            _state["checking"] = False
-
-    with lock:
-        if _state.get("checking"):  # double-check
-            return {"running": True, "logged_in": False, "nickname": "", "user_id": "",
-                    "cookie": "", "account": None, "message": "已检测到登录，正在校验…"}
-        _state["checking"] = True
-    t = threading.Thread(target=_worker, daemon=True)
-    t.start()
+                "cookie": "", "account": None,
+                "message": "还未登录成功（游客状态），请完成扫码/验证码后再试"}
     return {"running": True, "logged_in": False, "nickname": "", "user_id": "",
-            "cookie": "", "account": None, "message": "已检测到登录，正在校验…"}
+            "cookie": "", "account": None,
+            "message": "登录态校验未通过：" + (err or "未知原因")}
 
 
 def cleanup_profile() -> bool:
