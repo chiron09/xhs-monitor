@@ -49,7 +49,15 @@ PIDFILE = os.path.join(DATA_DIR, "browser_login.pid")
 # 点击/滚动/文字输入经 CDP 注回。环境变量 XHS_LOGIN_HEADLESS=0 可退回
 # 「弹本地窗口」的旧行为（服务模式下走跨会话启动）。
 HEADLESS = os.environ.get("XHS_LOGIN_HEADLESS", "1") != "0"
-VIEWPORT = (1280, 800)
+# 视口越大，登录页里二维码/输入框渲染得越大，投到网页上才够扫
+VIEWPORT = (int(os.environ.get("XHS_LOGIN_VW", "1600")),
+            int(os.environ.get("XHS_LOGIN_VH", "1000")))
+# 截图像素密度：CSS 尺寸不变（坐标换算照旧），但图片像素翻 N 倍，
+# 前端把画面缩着看时二维码才不会糊（XHS_LOGIN_DSF=1 可关掉）
+# 注意：dsf 太高（2.0 = 3150x1700）会让前端每帧解码大图，把渲染主线程压得
+# 连页面脚本都跑不动；1.5 倍（2400x1500）清晰度与流畅度平衡最好。
+SHOT_DSF = float(os.environ.get("XHS_LOGIN_DSF", "1.5"))
+SHOT_QUALITY = int(os.environ.get("XHS_LOGIN_JPEG_Q", "58"))
 
 _state: dict = {"proc": None, "pid": None, "started_at": 0.0, "account": None}
 
@@ -747,7 +755,11 @@ def _page_ws_url() -> str | None:
 
 
 def snapshot() -> tuple[bool, str, int, int]:
-    """抓取当前登录页画面。返回 (ok, data_url, width, height)。"""
+    """抓取当前登录页画面。返回 (ok, data_url, width, height)。
+
+    width/height 是 CSS 逻辑尺寸（前端鼠标坐标换算用），图片本身按
+    SHOT_DSF 倍分辨率编码，缩小显示时二维码依然清晰。
+    """
     if not is_running():
         return False, "", 0, 0
     ws_url = _page_ws_url()
@@ -757,19 +769,109 @@ def snapshot() -> tuple[bool, str, int, int]:
     try:
         ws = _cdp_connect(ws_url)
         _cdp(ws, "Page.enable")
-        shot = _cdp(ws, "Page.captureScreenshot", {"format": "jpeg", "quality": 60}, msg_id=3)
+        metrics = _cdp(ws, "Page.getLayoutMetrics", msg_id=2)
+        css = (metrics.get("result") or {}).get("cssContentSize") or {}
+        cw = int(css.get("width") or VIEWPORT[0])
+        ch = int(css.get("height") or VIEWPORT[1])
+        # 高分截图走 clip.scale：不动页面布局（坐标换算照旧），
+        # 比 Emulation.setDeviceMetricsOverride 稳（后者首次调用会把无头合成器卡死）
+        capture = {"format": "jpeg", "quality": SHOT_QUALITY,
+                   "captureBeyondViewport": False}
+        if SHOT_DSF > 1:
+            capture["clip"] = {"x": 0, "y": 0, "width": cw, "height": ch,
+                               "scale": SHOT_DSF}
+        shot = _cdp(ws, "Page.captureScreenshot", capture, msg_id=3)
         data = (shot.get("result") or {}).get("data") or ""
         if not data:
             # 截图失败时把 CDP 错误带出来，便于诊断
             err = shot.get("error") or {}
             raise RuntimeError(f"captureScreenshot 失败: {err.get('message') or err}")
-        metrics = _cdp(ws, "Page.getLayoutMetrics", msg_id=4)
-        css = (metrics.get("result") or {}).get("cssContentSize") or {}
-        return (True, "data:image/jpeg;base64," + data,
-                int(css.get("width") or 0), int(css.get("height") or 0))
+        return (True, "data:image/jpeg;base64," + data, cw, ch)
     except Exception as e:  # noqa: BLE001
         _state["frame_error"] = str(e)
         return False, "", 0, 0
+    finally:
+        if ws is not None:
+            try:
+                ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _locate_qrcode() -> dict:
+    """在页面里找最大的一张可见二维码图（canvas/img），返回视口坐标矩形。"""
+    js = (
+        "(() => {"
+        "  const vw = window.innerWidth || document.documentElement.clientWidth;"
+        "  const vh = window.innerHeight || document.documentElement.clientHeight;"
+        "  const list = [...document.querySelectorAll('canvas, img')].filter(el => {"
+        "    const r = el.getBoundingClientRect();"
+        "    const visible = r.width > 80 && r.height > 80 && r.top < vh && r.bottom > 0 && r.left < vw && r.right > 0;"
+        "    if (!visible) return false;"
+        "    const cs = getComputedStyle(el);"
+        "    return cs.display !== 'none' && cs.visibility !== 'hidden';"
+        "  });"
+        "  if (!list.length) return {ok: false, reason: '页面上没有找到二维码图片'};"
+        "  let best = null, bestArea = 0;"
+        "  for (const el of list) {"
+        "    const r = el.getBoundingClientRect();"
+        "    const area = r.width * r.height;"
+        "    if (area > bestArea) { best = {r: r, tag: el.tagName}; bestArea = area; }"
+        "  }"
+        "  const r = best.r;"
+        "  return {ok: true, tag: best.tag,"
+        "          x: Math.max(0, Math.round(r.left + window.scrollX)),"
+        "          y: Math.max(0, Math.round(r.top + window.scrollY)),"
+        "          w: Math.round(r.width), h: Math.round(r.height)};"
+        "})()"
+    )
+    ws = _cdp_connect(_page_ws_url())
+    try:
+        _cdp(ws, "Page.enable")
+        res = _cdp(ws, "Runtime.evaluate",
+                   {"expression": js, "returnByValue": True}, msg_id=5)
+    finally:
+        try:
+            ws.close()
+        except Exception:  # noqa: BLE001
+            pass
+    value = (((res or {}).get("result") or {}).get("result") or {}).get("value") or {}
+    return value if isinstance(value, dict) else {}
+
+
+def qrcode_snapshot() -> tuple[bool, str, int, int, str]:
+    """只截页面里的二维码（PNG 无损 + 2 倍分辨率），专门用来给人眼/手机扫。
+
+    返回 (ok, data_url, width, height, message)。
+    """
+    if not is_running():
+        return False, "", 0, 0, "浏览器未运行"
+    info = _locate_qrcode()
+    if not info.get("ok"):
+        return False, "", 0, 0, info.get("reason") or "页面上没有找到二维码图片"
+    # 四周留一点边距，别把二维码贴边裁掉
+    margin = 8
+    clip = {
+        "x": max(0, info["x"] - margin),
+        "y": max(0, info["y"] - margin),
+        "width": max(1, info["w"] + margin * 2),
+        "height": max(1, info["h"] + margin * 2),
+        "scale": 2,
+    }
+    ws = None
+    try:
+        ws = _cdp_connect(_page_ws_url())
+        _cdp(ws, "Page.enable")
+        shot = _cdp(ws, "Page.captureScreenshot", {
+            "format": "png", "clip": clip, "captureBeyondViewport": True,
+            "optimizeForSpeed": False}, msg_id=6)
+        data = (shot.get("result") or {}).get("data") or ""
+        if not data:
+            err = shot.get("error") or {}
+            raise RuntimeError(f"captureScreenshot(clip) 失败: {err.get('message') or err}")
+        return (True, "data:image/png;base64," + data, clip["width"], clip["height"], "")
+    except Exception as e:  # noqa: BLE001
+        return False, "", 0, 0, str(e)
     finally:
         if ws is not None:
             try:
@@ -886,8 +988,16 @@ def check() -> dict:
         return {"running": False, "logged_in": False, "nickname": "", "user_id": "",
                 "cookie": "", "account": None, "message": "浏览器未打开"}
 
-    cookies = read_cookies()
-    ws = cookies.get("web_session") or ""
+    # 手机上点完「确认登录」后，正式 web_session 落地有一小段窗口；
+    # 立刻取可能读不到，给几次机会（每次间隔 1 秒），否则用户会以为「显示登录成功却没反应」
+    cookies = {}
+    ws = ""
+    for _i in range(3):
+        cookies = read_cookies()
+        ws = cookies.get("web_session") or ""
+        if ws:
+            break
+        time.sleep(1.0)
     if not cookies or not ws:
         return {"running": True, "logged_in": False, "nickname": "", "user_id": "",
                 "cookie": "", "account": None,

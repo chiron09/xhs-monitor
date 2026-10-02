@@ -67,6 +67,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
   .toolbar{gap:8px}
   .el-message-box{width:88vw !important}
 }
+/* 浏览器登录 tab：把弹窗撑开，内嵌画面才够大、二维码才扫得清
+   （必须放在上面所有 @media 之外，否则窄屏规则把它盖掉） */
+.el-dialog.wide-login{width:94vw !important;max-width:94vw !important}
+.el-dialog.wide-login .el-dialog__body{padding:12px 16px}
 </style>
 </head>
 <body>
@@ -284,7 +288,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
   </el-container>
 
   <!-- 添加账号弹窗 -->
-  <el-dialog v-model="accountDialogVisible" :title="cookieUpdateId ? '更新账号登录态' : '添加小红书账号'" width="560px" @close="resetAccountDialog">
+  <el-dialog v-model="accountDialogVisible" :title="cookieUpdateId ? '更新账号登录态' : '添加小红书账号'" width="560px"
+             :class="{ 'wide-login': accountTab === 'browser' }" @close="resetAccountDialog">
     <el-tabs v-model="accountTab">
       <el-tab-pane label="扫码登录" name="qrcode">
         <el-alert type="warning" :closable="false" show-icon style="margin-bottom:14px">
@@ -343,6 +348,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
         <el-button type="danger" style="width:100%" :loading="saving" @click="saveAccount">{{ cookieUpdateId ? '保存并更新登录态' : '保存并检测' }}</el-button>
       </el-tab-pane>
 
+      <!-- 二维码特写（浏览器登录画面里的二维码放大图） -->
+      <el-dialog v-model="qrCloseupVisible" title="扫码登录 — 二维码特写" width="420px" align-center>
+        <img v-if="qrCloseImage" :src="qrCloseImage" style="display:block;width:260px;height:auto;margin:0 auto;border:1px solid #ebeef5;border-radius:8px;background:#fff">
+        <div style="margin-top:12px;text-align:center;font-size:12px;color:#8a919f;line-height:1.7">
+          用手机「小红书」App 扫这张码即可登录。<br>二维码会随画面刷新，若已过期请关闭后重新打开登录页。
+        </div>
+        <template #footer>
+          <el-button @click="qrCloseupVisible=false">关闭</el-button>
+        </template>
+      </el-dialog>
+
       <el-tab-pane label="浏览器登录" name="browser">
         <div style="padding:4px 0">
           <el-alert type="info" :closable="false" show-icon style="margin-bottom:14px">
@@ -357,10 +373,23 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
             <el-button v-if="browserRunning && !browserChecking" type="success" size="large" :loading="browserChecking" @click="checkBrowserLogin">完成登录，读取登录态</el-button>
             <el-button v-if="browserRunning" size="small" @click="stopBrowserLogin">关闭</el-button>
             <div :style="{marginTop:'10px',fontSize:'13px',color:browserStatusColor}">{{ browserStatusText || '点击按钮，登录页将显示在下方画面中' }}</div>
+            <div v-show="browserRunning" style="margin:8px auto 0;display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap">
+              <span style="font-size:12px;color:#8a919f">画面大小</span>
+              <el-radio-group v-model="frameZoom" size="small" @change="restartFrameStream">
+                <el-radio-button value="fit">适应宽度</el-radio-button>
+                <el-radio-button value="1">原始 100%</el-radio-button>
+                <el-radio-button value="1.25">125%</el-radio-button>
+                <el-radio-button value="1.6">160%</el-radio-button>
+                <el-radio-button value="2">200%</el-radio-button>
+              </el-radio-group>
+              <el-button size="small" type="success" :loading="qrCloseLoading" @click="openQrCloseup">二维码特写</el-button>
+            </div>
           </div>
-          <div v-show="browserRunning" style="position:relative;width:100%;max-width:900px;margin:0 auto;border:1px solid #dcdfe6;border-radius:8px;overflow:hidden;background:#fff">
+          <div v-show="browserRunning" style="width:100%;max-width:1180px;margin:8px auto;background:#fff;border:1px solid #dcdfe6;border-radius:8px;overflow:auto">
+            <div :style="frameBoxStyle">
             <img id="loginFrame" :src="frameDataUrl" tabindex="0" @load="frameLoaded"
-                 style="display:block;width:100%;user-select:none;-webkit-user-drag:none;outline:none;cursor:text"
+                 :style="frameImgStyle"
+                 style="display:block;user-select:none;-webkit-user-drag:none;outline:none;cursor:text"
                  @mousedown.prevent="frameMouse($event,'pressed')"
                  @mouseup.prevent="frameMouse($event,'released')"
                  @mousemove="frameMouse($event,'moved')"
@@ -368,9 +397,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
                  @keydown="frameKey($event, true)"
                  @keyup="frameKey($event, false)"
                  @contextmenu.prevent>
-            <div style="position:absolute;left:0;right:0;bottom:0;padding:6px 12px;font-size:12px;color:#8a919f;background:rgba(255,255,255,.9);border-top:1px solid #f0f0f0;text-align:center">
-              上方为服务端登录页实时画面 — 直接用鼠标点击操作（点输入框可打字，可滚动）；登录完成后点上方「完成登录」按钮
             </div>
+          </div>
+          <div v-show="browserRunning" style="max-width:1180px;margin:0 auto;padding:6px 12px;font-size:12px;color:#8a919f;text-align:center">
+            上方为服务端登录页实时画面（高清图）— 直接用鼠标点击操作（点输入框可打字，可滚动）；画面看不清就调「画面大小」或点「二维码特写」用手机扫；放大后可用鼠标拖动画面查看；登录完成后点上方「完成登录」按钮
           </div>
         </div>
       </el-tab-pane>
@@ -481,6 +511,10 @@ const app = Vue.createApp({
       frameHeight: 0,
       frameTimer: null,
       frameBusy: false,
+      frameZoom: 'fit',
+      qrCloseupVisible: false,
+      qrCloseImage: '',
+      qrCloseLoading: false,
       pendingEvents: [],
       qrImage: '',
       qrLoading: false,
@@ -488,6 +522,7 @@ const app = Vue.createApp({
       qrStatusColor: '#8a919f',
       qrSessionId: '',
       qrTimer: null,
+      qrPersistAt: 0,
       phoneForm: { phone: '', code: '', name: '' },
       phoneSessionId: '',
       phoneLoading: false,
@@ -538,7 +573,22 @@ const app = Vue.createApp({
   computed: {
     pageTitle() {
       return { accounts:'账号管理', bloggers:'博主监控', notes:'笔记记录', settings:'系统设置' }[this.activeTab] || '';
-    }
+    },
+    // 放大只做 transform 缩放（GPU 合成），绝不改 img 的实际像素尺寸 ——
+    // 否则每帧要把 2400x1500 的大图重新解码绘制到 3000px 宽，页面会卡死十几秒
+    frameImgStyle() {
+      if (this.frameZoom === 'fit') return { width: '100%', transform: 'none' };
+      const s = parseFloat(this.frameZoom);
+      return { width: this.frameWidth + 'px', height: this.frameHeight + 'px',
+               transform: 'scale(' + s + ')',
+               transformOrigin: 'top left' };
+    },
+    frameBoxStyle() {
+      if (this.frameZoom === 'fit') return {};
+      const s = parseFloat(this.frameZoom);
+      return { width: (this.frameWidth * s) + 'px',
+               height: (this.frameHeight * s) + 'px' };
+    },
   },
   mounted() {
     if (this.token) this.checkAuth();
@@ -552,10 +602,11 @@ const app = Vue.createApp({
     this.stopFrameStream();
   },
   methods: {
-    async api(path, method='GET', body) {
+    async api(path, method='GET', body, timeoutMs, signal) {
       const opt = { method, headers: {} };
       if (this.token) opt.headers['Authorization'] = 'Bearer ' + this.token;
       if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+      if (signal) opt.signal = signal;
       const r = await fetch(path, opt);
       if (r.status === 401) {
         this.token = ''; localStorage.removeItem(TOKEN_KEY);
@@ -636,12 +687,18 @@ const app = Vue.createApp({
     async checkBrowserLogin() {
       if (this.browserChecking) return;
       this.browserChecking = true;
-      this.browserStatusText = '正在读取登录态并校验…';
       this.browserStatusColor = '#e6a23c';
+      const startedAt = Date.now();
+      // 等待期间持续刷新秒数，避免「点了没反应」的观感
+      const tick = setInterval(() => {
+        this.browserStatusText = '正在读取登录态并校验…（已等待 ' + Math.round((Date.now() - startedAt) / 1000) + ' 秒）';
+      }, 1000);
+      const ctrl = new AbortController();
+      const killer = setTimeout(() => ctrl.abort(), 150000); // 2.5 分钟还没结果就中断
       try {
         // 更新模式下传账号名，便于按名字匹配更新而非误新建
         const name = this.cookieUpdateId ? (this.accountForm.name || '') : '';
-        const r = await this.api('/api/accounts/browser/check' + (name ? '?name=' + encodeURIComponent(name) : ''), 'POST');
+        const r = await this.api('/api/accounts/browser/check' + (name ? '?name=' + encodeURIComponent(name) : ''), 'POST', null, 160000, ctrl.signal);
         if (r.logged_in && r.account) {
           this.stopFrameStream();
           this.browserStatusColor = '#67c23a';
@@ -649,20 +706,37 @@ const app = Vue.createApp({
           ElMessage.success('登录成功：' + (r.account.nickname || r.account.name));
           this.accountDialogVisible = false;
           this.browserRunning = false;
+      this.frameZoom = 'fit';
           this.loadAccounts();
         } else {
-          this.browserStatusText = r.message || '未检测到登录';
-          // 游客态（还没真正登录）是正常提示，不是错误
-          this.browserStatusColor = (r.message || '').indexOf('游客') >= 0 ? '#e6a23c' : '#f56c6c';
+          // 任何失败分支都必须有可见提示（以前静默只改小字，就是「无反应」的来源）
+          const msg = r.message || '未检测到登录';
+          this.browserStatusText = msg;
+          const guest = msg.indexOf('游客') >= 0;
+          this.browserStatusColor = guest ? '#e6a23c' : '#f56c6c';
+          ElMessage({ message: msg, type: guest ? 'warning' : 'error', duration: guest ? 3000 : 6000 });
         }
       } catch (e) {
-        this.browserStatusText = '校验失败，请重试';
+        const msg = e && e.name === 'AbortError' ? '校验超时（>2.5 分钟），请改用「浏览器登录」重新扫码' : '校验失败，请重试';
+        this.browserStatusText = msg;
         this.browserStatusColor = '#f56c6c';
-      } finally { this.browserChecking = false; }
+        ElMessage.error(msg);
+      } finally {
+        clearInterval(tick);
+        clearTimeout(killer);
+        this.browserChecking = false;
+      }
     },
     // ---- 内嵌画面：截图流 + 输入转发 ----
     startFrameStream() {
       this.stopFrameStream();
+      // 放大状态下每帧重绘 3000px 宽的大图会把浏览器主线程压死（实测卡 20 秒以上）。
+      // 放大时画面本来就是拿来「看清楚/扫码」的，直接停刷新，切回适应宽度再恢复。
+      if (this.frameZoom !== 'fit') {
+        this.browserStatusColor = '#e6a23c';
+        this.browserStatusText = '已放大查看，画面暂停刷新；要继续实时操作请切回「适应宽度」';
+        return;
+      }
       this.frameTimer = setInterval(async () => {
         if (this.frameBusy || !this.browserRunning) return;
         this.frameBusy = true;
@@ -684,13 +758,35 @@ const app = Vue.createApp({
           }
         } catch (e) { /* 网络抖动跳过本帧 */ }
         finally { this.frameBusy = false; }
-      }, 400);
+        // 放大状态下每帧要把 2400x1500 的图重新缩放到 3000px 宽绘制，
+        // 软件渲染会卡住主线程；放大时降帧率（看场景不需要高频刷新）
+      }, this.frameZoom === 'fit' ? 600 : 1500);
     },
     stopFrameStream() {
       if (this.frameTimer) { clearInterval(this.frameTimer); this.frameTimer = null; }
       this.frameBusy = false;
     },
     frameLoaded() { if (this.browserRunning) this.browserStatusText = ''; },
+    // 切换缩放倍率要按新倍率重启帧流（间隔不一样）
+    restartFrameStream() {
+      if (this.frameTimer && this.browserRunning) this.startFrameStream();
+    },
+    // 二维码特写：只截画面里的二维码，PNG 高清，方便手机直接扫
+    async openQrCloseup() {
+      if (this.qrCloseLoading) return;
+      this.qrCloseLoading = true;
+      try {
+        const r = await this.api('/api/accounts/browser/qrcode');
+        if (r.ok && r.image) {
+          this.qrCloseImage = r.image;
+          this.qrCloseupVisible = true;
+        } else {
+          ElMessage.warning(r.message || '当前画面里没有找到二维码，请先在画面内切到「扫码登录」');
+        }
+      } catch (e) {
+        ElMessage.error('获取二维码特写失败：' + e);
+      } finally { this.qrCloseLoading = false; }
+    },
     framePos(e) {
       const img = document.getElementById('loginFrame');
       if (!img || !this.frameWidth) return null;
@@ -741,6 +837,7 @@ const app = Vue.createApp({
       this.stopBrowserPolling();
       this.stopFrameStream();
       this.browserRunning = false;
+      this.frameZoom = 'fit';
       this.browserChecking = false;
       this.frameDataUrl = '';
       this.browserStatusText = '已关闭';
@@ -793,15 +890,29 @@ const app = Vue.createApp({
     },
     startQrPolling() {
       this.stopQrPolling();
+      this.qrPersistAt = 0;
       this.qrTimer = setInterval(async () => {
         if (!this.qrSessionId) return;
         try {
           const r = await this.api('/api/accounts/qrcode/poll?session_id=' + encodeURIComponent(this.qrSessionId));
-          this.qrStatusText = r.message || '';
+          if (r.status === 'confirmed' && r.persisting && !this.qrPersistAt) this.qrPersistAt = Date.now();
+          // 「正在校验登录态」必须带秒数，否则用户看到的就是「显示登录成功但没反应」
+          if (this.qrPersistAt) {
+            const sec = Math.round((Date.now() - this.qrPersistAt) / 1000);
+            this.qrStatusText = (r.message || '正在校验登录态…') + '（已等待 ' + sec + ' 秒，通常 5-20 秒）';
+          } else {
+            this.qrStatusText = r.message || '';
+          }
           if (r.status === 'scanned') this.qrStatusColor = '#e6a23c';
           else if (r.status === 'confirmed') this.qrStatusColor = '#67c23a';
           else if (r.status === 'expired' || r.status === 'error') this.qrStatusColor = '#f56c6c';
           else this.qrStatusColor = '#8a919f';
+          // 校验挂太久：前端自己兜底收尾，别让用户干等
+          if (this.qrPersistAt && Date.now() - this.qrPersistAt > 150000) {
+            this.stopQrPolling();
+            ElMessage.error('校验登录态超时（>2.5 分钟），请改用「浏览器登录」页内扫码');
+            return;
+          }
           if (r.status === 'confirmed') {
             // 登录成功但入库校验还在后台跑：停在「校验中」，等 persist_done
             if (r.account) {
@@ -860,10 +971,19 @@ const app = Vue.createApp({
         // 登录成功、后台正在校验入库：轮询结果接口直到出结果
         this.phoneStatusText = d.message || '登录成功，正在校验登录态…';
         const sid = this.phoneSessionId;
+        const startedAt = Date.now();
         const timer = setInterval(async () => {
+          // 超时兜底：后端超时后会返回 failed 结论，这里再防一层前端卡死
+          if (Date.now() - startedAt > 160000) {
+            clearInterval(timer);
+            this.phoneLoading = false;
+            ElMessage.error('校验登录态超时，请改用「浏览器登录」页内扫码');
+            return;
+          }
           try {
             const r = await this.api('/api/accounts/phone/verify/result?session_id=' + encodeURIComponent(sid));
-            this.phoneStatusText = r.message || '';
+            const sec = Math.round((Date.now() - startedAt) / 1000);
+            this.phoneStatusText = (r.message || '') + '（已等待 ' + sec + ' 秒）';
             if (r.status === 'ok' && r.account) {
               clearInterval(timer);
               this.phoneLoading = false;
