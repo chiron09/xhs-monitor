@@ -7,7 +7,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -19,11 +19,37 @@ import covers
 import notifier
 import scheduler
 import xhs_client
-from config import DEFAULT_PASSWORD, STATIC_DIR, hash_password
-from db import Account, Blogger, Note, SessionLocal, Setting
+from config import DEFAULT_PASSWORD, STATIC_DIR, TOKEN_TTL, hash_password
+from db import Account, AuthToken, Blogger, Note, SessionLocal, Setting
 
-# ---- 登录 token（内存态，重启失效） ----
-_tokens: set = set()
+# ---- 登录 token（持久化到 auth_tokens 表，重启后台不掉登录） ----
+# TOKEN_TTL: 0 表示永不过期；>0 则登录后该秒数内有效。
+
+
+def _token_expires_at() -> str:
+    """按 TOKEN_TTL 计算过期时间；0 表示永不过期（空字符串）。"""
+    if not TOKEN_TTL:
+        return ""
+    from datetime import timedelta
+    return (datetime.now() + timedelta(seconds=TOKEN_TTL)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _is_expired(expires_at: str) -> bool:
+    if not expires_at:
+        return False
+    try:
+        return datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S") < datetime.now()
+    except Exception:  # noqa: BLE001
+        return True  # 时间格式异常一律视为过期，避免误放行
+
+
+def _purge_expired_tokens(db) -> None:
+    """清理已过期 token（启动与校验时顺带清理）。"""
+    rows = db.query(AuthToken).filter(AuthToken.expires_at != "").all()
+    dead = [r.token for r in rows if _is_expired(r.expires_at)]
+    if dead:
+        db.query(AuthToken).filter(AuthToken.token.in_(dead)).delete(synchronize_session=False)
+        db.commit()
 
 
 def _get_password_hash() -> str:
@@ -43,6 +69,11 @@ def _get_password_hash() -> str:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     _get_password_hash()  # 确保默认密码已写入
+    db = SessionLocal()
+    try:
+        _purge_expired_tokens(db)  # 启动时清理过期 token
+    finally:
+        db.close()
     scheduler.start_scheduler()
     yield
     scheduler.stop_scheduler()
@@ -57,9 +88,23 @@ app.mount("/covers", StaticFiles(directory=covers.COVERS_DIR), name="covers")
 
 def require_auth(authorization: str = Header(default="")):
     token = authorization.replace("Bearer", "").strip()
-    if not token or token not in _tokens:
+    if not token:
         raise HTTPException(status_code=401, detail="未登录")
-    return token
+    db = SessionLocal()
+    try:
+        row = db.get(AuthToken, token)
+        if not row:
+            raise HTTPException(status_code=401, detail="未登录")
+        if _is_expired(row.expires_at):
+            db.delete(row)
+            db.commit()
+            raise HTTPException(status_code=401, detail="登录已过期")
+        # 记录最近活跃时间（轻量写入，便于排查）
+        row.last_seen_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        db.commit()
+        return token
+    finally:
+        db.close()
 
 
 # ---------- 请求模型 ----------
@@ -141,24 +186,58 @@ def index():
 
 # ---------- 认证 ----------
 @app.post("/api/auth/login")
-def login(req: LoginRequest):
+def login(req: LoginRequest, request: Request):
     if hash_password(req.password) != _get_password_hash():
         raise HTTPException(status_code=401, detail="密码错误")
     token = secrets.token_hex(32)
-    _tokens.add(token)
-    return {"token": token}
+    db = SessionLocal()
+    try:
+        db.add(AuthToken(
+            token=token,
+            created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            expires_at=_token_expires_at(),
+            last_seen_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            user_agent=(request.headers.get("user-agent") or "")[:256],
+            remote_addr=(request.client.host if request.client else "")[:64],
+        ))
+        db.commit()
+    finally:
+        db.close()
+    return {"token": token, "expires_in": TOKEN_TTL}
 
 
 @app.post("/api/auth/logout")
 def logout(authorization: str = Header(default="")):
-    _tokens.discard(authorization.replace("Bearer", "").strip())
+    token = authorization.replace("Bearer", "").strip()
+    if token:
+        db = SessionLocal()
+        try:
+            row = db.get(AuthToken, token)
+            if row:
+                db.delete(row)
+                db.commit()
+        finally:
+            db.close()
     return {"ok": True}
 
 
 @app.get("/api/auth/status")
 def auth_status(authorization: str = Header(default="")):
     token = authorization.replace("Bearer", "").strip()
-    return {"authed": bool(token and token in _tokens)}
+    if not token:
+        return {"authed": False}
+    db = SessionLocal()
+    try:
+        row = db.get(AuthToken, token)
+        if not row:
+            return {"authed": False}
+        if _is_expired(row.expires_at):
+            db.delete(row)
+            db.commit()
+            return {"authed": False}
+        return {"authed": True}
+    finally:
+        db.close()
 
 
 @app.post("/api/auth/password")
@@ -172,7 +251,13 @@ def change_password(req: PasswordRequest, _=Depends(require_auth)):
         db.commit()
     finally:
         db.close()
-    _tokens.clear()  # 改密后强制重新登录
+    # 改密后强制重新登录：清空所有 token
+    db = SessionLocal()
+    try:
+        db.query(AuthToken).delete(synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
     return {"ok": True}
 
 
@@ -551,6 +636,7 @@ def create_blogger(req: BloggerCreate, _=Depends(require_auth)):
             account_id=req.account_id,
             interval_minutes=req.interval_minutes,
             status="active",
+            monitor_since=int(datetime.now().timestamp() * 1000),
         )
         db.add(b)
         db.commit()
@@ -688,6 +774,8 @@ def import_followings(req: ImportFollowingsRequest, _=Depends(require_auth)):
                 account_id=req.account_id,
                 interval_minutes=req.interval_minutes or 60,
                 status="active",
+                # 监控起点 = 导入这一刻，之后的笔记才算新笔记
+                monitor_since=int(datetime.now().timestamp() * 1000),
                 # last_crawled_at 留空 → 调度器判定到期，按限流错峰抓取建基线
             ))
             existing.add(uid)

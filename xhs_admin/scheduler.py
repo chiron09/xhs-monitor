@@ -51,10 +51,58 @@ def _set_baseline(blogger: Blogger, note_ids: list) -> None:
     blogger.baseline_note_ids = json.dumps(note_ids, ensure_ascii=False)
 
 
+def _day_start_ms(ts: float) -> int:
+    """给定时间戳，返回其所在「当天 00:00:00」的毫秒时间戳（本地时区）。"""
+    d = datetime.fromtimestamp(ts)
+    start = d.replace(hour=0, minute=0, second=0, microsecond=0)
+    return int(start.timestamp() * 1000)
+
+
+def _is_published_today(publish_time: int) -> bool:
+    """publish_time（毫秒）是否落在今天 00:00 ~ 现在之间。
+
+    publish_time 缺失（0 或非法）时无法判定，按「放行」处理，
+    交由 _passes_new_filter 的「晚于监控起点」条件兜底，避免漏推。
+    """
+    try:
+        pt = int(publish_time or 0)
+    except (TypeError, ValueError):
+        return True
+    if pt <= 0:
+        return True
+    now = datetime.now()
+    return _day_start_ms(now.timestamp()) <= pt <= int(now.timestamp() * 1000)
+
+
+def _is_after_monitor_since(publish_time: int, monitor_since: int) -> bool:
+    """publish_time 是否晚于「添加博主」时刻。
+
+    monitor_since 未设置（0）时不做此过滤（兼容历史博主），
+    再交给「当天」条件约束。
+    """
+    if not monitor_since:
+        return True
+    try:
+        pt = int(publish_time or 0)
+    except (TypeError, ValueError):
+        return True
+    if pt <= 0:
+        # 发布时间缺失：无法证明是「监控起点后」发布，保守判定为不属于新笔记
+        return False
+    return pt > int(monitor_since)
+
+
+def _passes_new_filter(note: dict, monitor_since: int) -> bool:
+    """双重过滤：必须是「今天发布」且「晚于监控起点」的笔记。"""
+    pt = note.get("publish_time", 0)
+    return _is_published_today(pt) and _is_after_monitor_since(pt, monitor_since)
+
+
 def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False) -> dict:
     """抓取一个博主，识别新笔记并入库。
 
     establish_baseline=True 时只建立基线不入库（用于添加博主那一刻）。
+    入库条件（同时满足）：① 不在基线中；② 今天发布；③ 晚于监控起点。
     """
     blogger = db.get(Blogger, blogger_id)
     if not blogger:
@@ -65,6 +113,10 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False) ->
         blogger.last_error = "未指定有效账号"
         db.commit()
         return {"ok": False, "error": "未指定有效账号"}
+
+    # 首次抓取且未设监控起点：以当前时刻为起点（添加博主那一刻）
+    if not blogger.monitor_since:
+        blogger.monitor_since = int(datetime.now().timestamp() * 1000)
 
     ok, notes, nickname, error = fetch_notes_page(account.cookie, blogger.url)
     blogger.last_crawled_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -87,10 +139,15 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False) ->
     if establish_baseline or not baseline:
         # 基线为空（首次成功抓取，或此前基线未建成）：先补基线，
         # 绝不把博主添加之前的旧笔记当成"新笔记"入库。
-        new_notes = []
+        candidates = []
     else:
         known = set(baseline)
-        new_notes = [n for n in normalized if n["note_id"] not in known]
+        candidates = [n for n in normalized if n["note_id"] not in known]
+
+    # 双重过滤：只保留「今天发布」且「晚于监控起点」的笔记
+    monitor_since = blogger.monitor_since or 0
+    new_notes = [n for n in candidates if _passes_new_filter(n, monitor_since)]
+    skipped = len(candidates) - len(new_notes)
 
     for n in new_notes:
         # 封面本地化：CDN 链接带时效签名会过期，入库时立即下载（失败保留原链接）
@@ -150,6 +207,7 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False) ->
         "ok": True,
         "crawled": len(normalized),
         "new_count": len(new_notes),
+        "skipped_count": skipped,
         "baseline_count": len(current_ids),
         "nickname": nickname,
         "notify": notify_result,

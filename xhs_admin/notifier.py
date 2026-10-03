@@ -81,6 +81,14 @@ def format_notes(blogger_name: str, notes: list) -> tuple[str, str]:
     for i, n in enumerate(notes, 1):
         t = (n.get("title") or "(无标题)").strip()
         lines.append(f"{i}. {t}")
+        # 标注发布时间，便于确认是当天新发的（ms 时间戳）
+        pt = n.get("publish_time") or 0
+        if pt:
+            try:
+                from datetime import datetime as _dt
+                lines.append(f"发布：{_dt.fromtimestamp(int(pt) / 1000).strftime('%Y-%m-%d %H:%M')}")
+            except Exception:  # noqa: BLE001
+                pass
         lines.append(f"链接：{n.get('note_url') or ''}")
         lines.append("")
     return title, "\n".join(lines)

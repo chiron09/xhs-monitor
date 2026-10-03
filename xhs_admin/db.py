@@ -62,6 +62,9 @@ class Blogger(Base):
     interval_minutes = Column(Integer, default=60)
     status = Column(String(16), default="active")  # active / paused
     baseline_note_ids = Column(Text, default="[]")  # JSON 列表
+    # 监控起点（毫秒时间戳）：添加博主那一刻。
+    # 只把此刻之后发布的笔记视为「新笔记」，避免把添加前的历史笔记推出去。
+    monitor_since = Column(BigInteger, default=0)
     last_crawled_at = Column(String(32), default="")
     last_error = Column(Text, default="")
     created_at = Column(String(32), default=_now)
@@ -81,6 +84,7 @@ class Blogger(Base):
             "interval_minutes": self.interval_minutes,
             "status": self.status,
             "baseline_count": len(baseline),
+            "monitor_since": self.monitor_since or 0,
             "last_crawled_at": self.last_crawled_at,
             "last_error": self.last_error,
             "created_at": self.created_at,
@@ -123,4 +127,44 @@ class Setting(Base):
     value = Column(Text, default="")
 
 
+class AuthToken(Base):
+    """登录 token（持久化，重启后台不掉登录）。
+
+    expires_at 为空字符串表示永不过期；非空则为 'YYYY-MM-DD HH:MM:SS'，
+    校验时与该时刻比较，过期即视为无效。
+    """
+    __tablename__ = "auth_tokens"
+
+    token = Column(String(64), primary_key=True)
+    created_at = Column(String(32), default=_now)
+    expires_at = Column(String(32), default="")
+    last_seen_at = Column(String(32), default="")
+    user_agent = Column(String(256), default="")
+    remote_addr = Column(String(64), default="")
+
+
 Base.metadata.create_all(engine)
+
+
+def _ensure_columns() -> None:
+    """轻量迁移：为已存在的旧表补新增列（SQLite 不支持自动加列）。"""
+    import sqlite3
+    wanted = {
+        "bloggers": [("monitor_since", "BIGINT DEFAULT 0")],
+    }
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            for table, cols in wanted.items():
+                existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+                for name, ddl in cols:
+                    if name not in existing:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001  # 迁移失败不应阻断启动
+        pass
+
+
+_ensure_columns()
