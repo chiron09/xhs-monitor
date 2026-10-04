@@ -10,10 +10,12 @@ env/
 *.bak
 *.log
 *.old
+*.pid
 
 # ===== xhs_admin 运行时数据（含明文小红书 Cookie，禁止提交）=====
 xhs_admin/data/*.db
 xhs_admin/data/chrome_profile/
+xhs_admin/data/*.txt
 
 # ===== Spider_XHS 凭据 / 缓存（含真实 Cookie）=====
 Spider_XHS/.env

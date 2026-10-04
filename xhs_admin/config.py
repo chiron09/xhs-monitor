@@ -11,17 +11,17 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 DB_PATH = os.path.join(DATA_DIR, "xhs_admin.db")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 
-# 后台默认密码（首次启动写入，可在系统设置里改）
-DEFAULT_PASSWORD = "admin123"
+# 后台默认密码（首次启动写入，可在系统设置里改；可用环境变量覆盖）
+DEFAULT_PASSWORD = os.environ.get("XHS_ADMIN_PASSWORD") or "admin123"
 
 # 登录 token 有效期（秒），0 表示不过期（直到服务重启）
-TOKEN_TTL = 0
+TOKEN_TTL = int(os.environ.get("XHS_ADMIN_TOKEN_TTL") or 0)
 
 # 调度器检查间隔（秒）：每隔这么久扫一遍是否到点
-SCHEDULER_INTERVAL = 20
+SCHEDULER_INTERVAL = int(os.environ.get("XHS_ADMIN_SCHEDULER_INTERVAL") or 20)
 
-# 密码加盐（本机后台，固定盐即可）
-SALT = "xhs-admin-local-2026"
+# 密码加盐（本机后台，固定盐即可；可用环境变量覆盖）
+SALT = os.environ.get("XHS_ADMIN_SALT") or "xhs-admin-local-2026"
 
 
 def hash_password(pwd: str) -> str:

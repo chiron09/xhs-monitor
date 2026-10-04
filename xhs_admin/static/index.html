@@ -5,6 +5,7 @@
 <meta name="referrer" content="no-referrer">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>小红书博主监控后台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23ff2442'/%3E%3Ctext x='16' y='22' font-size='17' font-family='sans-serif' font-weight='bold' fill='%23fff' text-anchor='middle'%3E红%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/element-plus@2.9.1/dist/index.css">
 <style>
 [v-cloak]{display:none}
@@ -44,33 +45,202 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
 .aside{display:flex;flex-direction:column}
 
 /* 顶栏 */
-.topbar{height:56px;display:flex;align-items:center;justify-content:space-between;padding:0 20px;background:#fff;border-bottom:1px solid #ebeef5}
+.topbar{height:56px;display:flex;align-items:center;padding:0;background:#fff;border-bottom:1px solid #ebeef5}
 .topbar .page-title{font-size:15px;font-weight:600}
+/* 顶栏内层与内容区同宽居中，保证上下左右边界严格对齐 */
+.topbar-inner{width:100%;max-width:1280px;margin:0 auto;padding:0 20px;box-sizing:border-box;display:flex;align-items:center;justify-content:space-between}
+@media (min-width:1600px){ .topbar-inner{max-width:1440px} }
+@media (min-width:1920px){ .topbar-inner{max-width:1600px;padding:0 28px} }
+
+/* 主内容区：宽屏居中 + 上下与顶栏对齐
+   原来 max-width:1280px 直接写死在标签上，宽屏时内容贴左、右侧大片留白。
+   这里改用「内层容器居中」方案：el-main 撑满，内部 .content-inner 居中限宽。
+   关键：el-main 是 flex 子项，必须加 min-width:0，否则带 max-width 的内层
+   会参与 flex 基准计算、把 el-main 撑得比容器还宽，导致 margin:auto 算成负值。 */
+.el-main{padding:0 !important;min-width:0}
+.content-inner{width:100%;max-width:1280px;margin:0 auto;padding:20px;box-sizing:border-box}
+/* 大屏放开最大宽度，让表格有更多横向空间 */
+@media (min-width:1600px){ .content-inner{max-width:1440px} }
+@media (min-width:1920px){ .content-inner{max-width:1600px;padding:24px 28px} }
 
 .toolbar{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
 .toolbar .spacer{flex:1}
 .img-error{width:50px;height:50px;border-radius:6px;background:#f2f3f5;display:flex;align-items:center;justify-content:center;color:#c0c4cc;font-size:12px}
-.card{background:#fff;border-radius:8px;padding:16px}
+.card{background:#fff;border-radius:10px;padding:16px;border:1px solid #f0f1f4}
 
-/* 响应式：窄屏适配 */
-@media (max-width: 768px) {
-  .login-card{max-width:92vw;padding:28px 22px}
-  .login-body{flex-direction:column;justify-content:center;gap:28px;padding:28px 5%}
-  .login-hero h1{font-size:26px}
-  .hero-bubbles{display:none}
-  .el-dialog{width:92vw !important;max-width:92vw !important}
-  .el-main{padding:12px !important}
-  .topbar{padding:0 12px}
-  .card{padding:12px}
-}
-@media (max-width: 480px) {
-  .toolbar{gap:8px}
-  .el-message-box{width:88vw !important}
-}
+/* ================= PC 端布局优化 ================= */
+
+/* 卡片标题栏（如「添加博主」上方的说明行）与工具条之间的呼吸感 */
+.card + .card{margin-top:16px}
+
+/* --- 表格：宽屏下的可读性优化 --- */
+.el-table{--el-table-border-color:#f0f1f4}
+.el-table th.el-table__cell{background:#fafbfc;font-weight:600;color:#5f6470}
+.el-table .el-table__cell{padding:10px 0}
+/* 行悬浮高亮更明显，长表格里更容易定位当前行 */
+.el-table tbody tr:hover > td.el-table__cell{background:#f7f9fc !important}
+/* 表格内容为空时给足高度，避免卡片塌成一条 */
+.el-table__empty-block{min-height:200px}
+.el-table__empty-text{color:#a8adb8}
+/* 时间/数字列用等宽感字体，纵向对齐更整齐 */
+.el-table td.el-table__cell{font-variant-numeric:tabular-nums}
+/* 操作列的按钮组留给手指/鼠标足够的点击间距 */
+.el-table .el-button + .el-button{margin-left:8px}
+/* 长表格：表头吸顶，滚动时始终可见列名 */
+.table-scroll{max-height:calc(100vh - 300px);overflow:auto}
+.table-scroll .el-table__header-wrapper{position:sticky;top:0;z-index:2;background:#fff}
+
+/* 表格上方的说明文字：放到工具条末尾更省空间，宽屏不换行 */
+.toolbar .hint{font-size:13px;color:#8a919f;margin-left:4px}
+
+/* --- 设置页：宽屏双列布局（密码 + 推送各占一列，或推送内部渠道双列） --- */
+.settings-grid{display:grid;grid-template-columns:minmax(0,440px) minmax(0,1fr);gap:20px;align-items:start}
+@media (max-width:1200px){ .settings-grid{grid-template-columns:1fr} }
+/* 卡片标题/说明的统一样式（替代散落的内联 style） */
+.card-head{font-size:16px;font-weight:600;color:#22242a;margin-bottom:18px}
+.card-desc{font-size:12px;color:#8a919f;margin:-12px 0 18px}
+.narrow-card .card-head{margin-bottom:20px}
+/* 推送渠道在宽屏下两列排布，窄屏自动回落到单列 */
+.notify-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 28px}
+@media (max-width:1100px){ .notify-list{grid-template-columns:1fr} }
+.notify-item{padding:16px 0;border-top:1px solid #f0f0f0}
+/* 单列时首项去掉顶部分割线（上方已有 panel-sub 分隔） */
+@media (max-width:1100px){ .notify-list .notify-item:first-child{border-top:1px solid #f0f0f0} }
+
+/* --- 强调块：把「启用推送」做成独立的浅色区块，视觉上分组更清晰 --- */
+.panel-sub{background:#fafbfc;border:1px solid #f0f1f4;border-radius:8px;padding:14px 16px;margin-bottom:16px}
+
+/* --- 统计信息行（表格下方「共 N 条笔记」） --- */
+.stat-line{font-size:12px;color:#8a919f;margin-top:12px}
+.stat-line b{color:#303133;font-weight:600}
+
+/* --- 监控时段控件 --- */
+.time-range{display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%}
+.time-range-inputs{display:inline-flex;align-items:center;gap:0}
+.time-hint{font-size:12px;color:#a3a9b5;line-height:1.5;margin-top:4px;width:100%}
+
+/* 顶部栏的汉堡按钮（桌面隐藏，手机显示） */
+.mobile-menu-btn{display:none}
+/* 手机端侧边栏遮罩 */
+.side-mask{display:none}
+
 /* 浏览器登录 tab：把弹窗撑开，内嵌画面才够大、二维码才扫得清
-   （必须放在上面所有 @media 之外，否则窄屏规则把它盖掉） */
-.el-dialog.wide-login{width:94vw !important;max-width:94vw !important}
+   （必须放在下面所有 @media 之外，否则窄屏规则把它盖掉） */
 .el-dialog.wide-login .el-dialog__body{padding:12px 16px}
+
+/* ================= 响应式：窄屏 / 手机适配 ================= */
+
+/* 平板 / 小笔记本：不再让弹窗保持固定像素宽 */
+@media (max-width: 992px) {
+  .el-dialog:not(.wide-login){width:86vw !important;max-width:86vw !important}
+}
+
+/* 手机 / 窄屏主适配层（断点与 JS 的 window.innerWidth < 768 严格对齐：
+   CSS 用 max-width:767.98px，避免 768px（iPad 竖屏）被误判为手机） */
+@media (max-width: 767.98px) {
+  /* ---- 登录页 ---- */
+  .login-body{padding:22px 16px}
+  .login-card{max-width:100%;width:100%;box-sizing:border-box;padding:26px 20px;border-radius:12px;box-shadow:0 8px 26px rgba(31,45,61,.10)}
+  .login-topbar{height:52px;padding:0 14px}
+  .brand-name{font-size:15px}
+  .login-body{flex-direction:column;justify-content:center;gap:24px;padding:22px 5%}
+  .login-hero{text-align:center}
+  .login-hero h1{font-size:24px;line-height:1.5}
+  .login-hero p{margin-top:10px;font-size:13px}
+  .hero-bubbles{display:none}
+  .card-title{font-size:16px;margin-bottom:20px}
+
+  /* ---- 布局容器：允许纵向伸缩，禁止横向撑破 ---- */
+  .el-container,.aside{min-width:0}
+  .el-main{padding:0 !important;max-width:100% !important}
+  .content-inner{padding:12px;max-width:100%}
+  .topbar{height:50px !important}
+  .topbar-inner{padding:0 10px}
+  .topbar .page-title{font-size:14px}
+  .card{padding:12px;border-radius:8px}
+
+  /* ---- 侧边栏改为抽屉式：默认移出屏幕，点汉堡后滑入 ---- */
+  .mobile-menu-btn{display:inline-flex}
+  .desktop-toggle{display:none}
+  .topbar-logout{display:none}
+  .aside{position:fixed;top:0;bottom:0;left:0;z-index:2000;
+         transform:translateX(-100%);transition:transform .25s ease;
+         box-shadow:2px 0 16px rgba(0,0,0,.14);width:220px !important}
+  .el-container.side-open .aside{transform:translateX(0)}
+  .el-container.side-open .side-mask{display:block}
+  .side-mask{position:fixed;inset:0;background:rgba(0,0,0,.42);z-index:1999}
+  .side-logo{padding-left:14px;justify-content:flex-start}
+  .side-menu:not(.el-menu--collapse){border-right:none}
+
+  /* ---- 弹窗：满宽、内容可滚动、底部按钮不贴边 ---- */
+  .el-dialog{width:94vw !important;max-width:94vw !important;margin-top:5vh !important;border-radius:12px}
+  .el-dialog.wide-login{margin-top:2vh !important}
+  .el-dialog__header{padding:14px 16px 10px}
+  .el-dialog__body{padding:12px 14px;max-height:74vh;overflow:auto;-webkit-overflow-scrolling:touch}
+  .el-dialog__footer{padding:10px 14px 14px}
+  .el-dialog__title{font-size:16px}
+  /* footer 按钮在窄屏均匀铺开，便于手指点按 */
+  .el-dialog__footer .el-button{min-height:38px}
+
+  /* ---- 表单：标签改到输入框上方，避免被压成一条缝 ---- */
+  .el-form-item{flex-direction:column;align-items:stretch}
+  .el-form-item__label{justify-content:flex-start !important;text-align:left !important;
+                       width:auto !important;max-width:100% !important;
+                       padding:0 0 4px 0 !important;line-height:1.4;height:auto}
+  .el-form-item__content{margin-left:0 !important}
+  .el-select,.el-input,.el-input-number{max-width:100%}
+
+  /* ---- 工具条：按钮可换行铺满 ---- */
+  .toolbar{gap:8px;margin-bottom:12px}
+  .toolbar .spacer{display:none}
+  .toolbar .el-button{flex:1 1 auto;margin-left:0 !important}
+  .toolbar > .el-select{width:100% !important}
+
+  /* ---- 表格：窄屏下允许横向滑动，操作列不再固定以免遮挡内容 ---- */
+  .el-table{font-size:13px;width:100% !important}
+  .el-table .cell{padding-left:8px;padding-right:8px;word-break:break-word}
+  /* 窄屏取消固定列（Element Plus 的固定层会遮挡滑动的表格内容） */
+  .el-table__fixed,.el-table__fixed-right{display:none !important}
+  .el-table th.el-table-fixed-column--right,
+  .el-table td.el-table-fixed-column--right,
+  .el-table th.el-table-fixed-column--left,
+  .el-table td.el-table-fixed-column--left{position:static !important;background:inherit !important}
+  /* 卡片作为横向滚动容器 */
+  .card{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  /* 手机端表头不吸顶（横向滚动时 sticky 表头会错位） */
+  .table-scroll{max-height:none;overflow:visible}
+  .table-scroll .el-table__header-wrapper{position:static}
+  /* 表格外层滚动条更细，减少遮挡 */
+  .el-scrollbar__bar{opacity:.35}
+
+  /* ---- 设置页表单块不再固定窄宽 ---- */
+  .card[style*="max-width:460px"],.narrow-card{max-width:100% !important}
+  /* 设置页推送渠道标题行：窄屏改为上下堆叠 */
+  .notify-head{flex-direction:column;align-items:flex-start !important;gap:8px}
+  .notify-head > div:last-child{align-self:flex-end}
+  /* 启用推送 / 测试按钮行：窄屏铺开 */
+  .notify-actions{flex-wrap:wrap}
+  .notify-actions .el-button{flex:1 1 auto;margin-left:0 !important}
+
+  /* ---- 浏览器登录画面 ---- */
+  #loginFrame{cursor:default}
+  /* 画面大小单选组在窄屏可换行，避免超出 */
+  .frame-zoom{flex-wrap:wrap;justify-content:center}
+  .frame-zoom .el-radio-group{flex-wrap:wrap;justify-content:center}
+}
+
+/* 超小屏（手机竖屏窄机）微调 */
+@media (max-width: 480px) {
+  .toolbar{gap:6px}
+  .toolbar .el-button{font-size:13px;padding:8px 10px}
+  .el-message-box{width:90vw !important}
+  .el-message{min-width:0 !important;width:90vw}
+  .login-hero h1{font-size:21px}
+  .el-dialog{width:96vw !important;max-width:96vw !important}
+  .el-dialog__body{max-height:70vh}
+  /* 数字输入框 + 后缀文字换行显示 */
+  .el-input-number{width:100%}
+}
 </style>
 </head>
 <body>
@@ -106,7 +276,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
   </div>
 
   <!-- 主界面 -->
-  <el-container v-else style="height:100%">
+  <el-container v-else style="height:100%" :class="{'side-open': sidebarOpen}">
     <el-aside :width="sidebarCollapse ? '64px' : '220px'" class="aside" style="background:#fff;border-right:1px solid #ebeef5;transition:width .2s">
       <div class="side-logo" :class="{collapsed: sidebarCollapse}">
         <span class="logo-block">小红书</span>
@@ -128,27 +298,36 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
         </el-button>
       </div>
     </el-aside>
+    <!-- 手机端抽屉遮罩：点击关闭侧边栏 -->
+    <div class="side-mask" @click="sidebarOpen = false"></div>
 
     <el-container>
       <el-header class="topbar" height="56px">
-        <div style="display:flex;align-items:center;gap:10px">
-          <el-button text @click="sidebarCollapse = !sidebarCollapse">
-            <el-icon><expand v-if="sidebarCollapse"></expand><fold v-else></fold></el-icon>
-          </el-button>
-          <div class="page-title">{{ pageTitle }}</div>
+        <div class="topbar-inner">
+          <div style="display:flex;align-items:center;gap:10px;min-width:0">
+            <el-button class="mobile-menu-btn" text @click="sidebarOpen = !sidebarOpen; sidebarCollapse = false">
+              <el-icon><expand></expand></el-icon>
+            </el-button>
+            <el-button class="desktop-toggle" text @click="sidebarCollapse = !sidebarCollapse">
+              <el-icon><expand v-if="sidebarCollapse"></expand><fold v-else></fold></el-icon>
+            </el-button>
+            <div class="page-title">{{ pageTitle }}</div>
+          </div>
+          <el-button class="topbar-logout" size="small" @click="doLogout">退出登录</el-button>
         </div>
-        <el-button size="small" @click="doLogout">退出登录</el-button>
       </el-header>
-      <el-main style="padding:20px;max-width:1280px">
+      <el-main>
+        <div class="content-inner">
 
         <!-- 账号管理 -->
         <div v-if="activeTab==='accounts'">
           <div class="toolbar">
             <el-button type="danger" @click="openAccountDialog">＋ 添加账号</el-button>
             <el-button @click="loadAccounts"><el-icon><refresh></refresh></el-icon>刷新</el-button>
-            <span style="font-size:13px;color:#8a919f">添加小红书账号（粘贴 Cookie），添加时自动检测登录态</span>
+            <span class="hint">添加小红书账号（粘贴 Cookie），添加时自动检测登录态</span>
           </div>
           <div class="card">
+            <div class="table-scroll">
             <el-table :data="accounts" stripe empty-text="暂无账号，点击上方「添加账号」">
               <el-table-column prop="id" label="ID" width="60"></el-table-column>
               <el-table-column prop="name" label="账号名" min-width="120"></el-table-column>
@@ -165,6 +344,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
                 </template>
               </el-table-column>
             </el-table>
+            </div>
           </div>
         </div>
 
@@ -175,9 +355,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
             <el-button @click="openFollowImport">导入关注列表</el-button>
             <el-button @click="loadBloggers"><el-icon><refresh></refresh></el-icon>刷新</el-button>
             <el-button :disabled="!bloggerSelection.length" @click="openBatchDialog">批量修改（{{bloggerSelection.length}}）</el-button>
-            <span style="font-size:13px;color:#8a919f">添加后立即建立基线，此后只记录新发布的笔记</span>
+            <span class="hint">添加后立即建立基线，此后只记录新发布的笔记</span>
           </div>
           <div class="card">
+            <div class="table-scroll">
             <el-table :data="bloggers" stripe @selection-change="onBloggerSelectionChange" empty-text="暂无博主，点击上方「添加博主」">
               <el-table-column type="selection" width="45"></el-table-column>
               <el-table-column prop="id" label="ID" width="60"></el-table-column>
@@ -191,6 +372,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
               <el-table-column label="轮巡间隔" width="90">
                 <template #default="{row}">{{row.interval_minutes}} 分钟</template>
               </el-table-column>
+              <el-table-column label="监控时段" width="130">
+                <template #default="{row}">
+                  <el-tag v-if="!row.monitor_start && !row.monitor_end" size="small" type="info" effect="plain">全天</el-tag>
+                  <el-tag v-else size="small" type="success" effect="plain">{{windowText(row)}}</el-tag>
+                </template>
+              </el-table-column>
               <el-table-column prop="baseline_count" label="基线" width="70"></el-table-column>
               <el-table-column prop="last_crawled_at" label="最近抓取" min-width="150"></el-table-column>
               <el-table-column label="操作" width="185" fixed="right">
@@ -201,6 +388,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
                 </template>
               </el-table-column>
             </el-table>
+            </div>
           </div>
         </div>
 
@@ -216,6 +404,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
             <el-button type="danger" @click="clearNotes">清空</el-button>
           </div>
           <div class="card">
+            <div class="table-scroll">
             <el-table :data="notes" stripe empty-text="暂无笔记记录" @selection-change="onNoteSelectionChange">
               <el-table-column type="selection" width="45"></el-table-column>
               <el-table-column label="封面" width="70">
@@ -237,52 +426,59 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
                 <template #default="{row}"><el-button size="small" link type="primary" @click="copyNote(row.note_url)">复制链接</el-button></template>
               </el-table-column>
             </el-table>
+            </div>
           </div>
-          <div style="font-size:12px;color:#8a919f;margin-top:10px">共 {{notesTotal}} 条笔记</div>
+          <div class="stat-line">共 <b>{{notesTotal}}</b> 条笔记</div>
         </div>
 
         <!-- 系统设置 -->
         <div v-if="activeTab==='settings'">
-          <div class="card" style="max-width:460px;margin-bottom:20px">
-            <div style="font-size:16px;font-weight:600;margin-bottom:20px">修改后台密码</div>
-            <el-form label-width="90px">
-              <el-form-item label="旧密码"><el-input v-model="pwdForm.old" type="password" show-password></el-input></el-form-item>
-              <el-form-item label="新密码"><el-input v-model="pwdForm.newPwd" type="password" show-password placeholder="至少 4 位"></el-input></el-form-item>
-              <el-form-item label="确认新密码"><el-input v-model="pwdForm.confirm" type="password" show-password></el-input></el-form-item>
-              <el-form-item><el-button type="danger" @click="changePassword">保存修改</el-button></el-form-item>
-            </el-form>
-          </div>
+          <div class="settings-grid">
+            <div class="card narrow-card">
+              <div class="card-head">修改后台密码</div>
+              <el-form label-width="90px">
+                <el-form-item label="旧密码"><el-input v-model="pwdForm.old" type="password" show-password></el-input></el-form-item>
+                <el-form-item label="新密码"><el-input v-model="pwdForm.newPwd" type="password" show-password placeholder="至少 4 位"></el-input></el-form-item>
+                <el-form-item label="确认新密码"><el-input v-model="pwdForm.confirm" type="password" show-password></el-input></el-form-item>
+                <el-form-item><el-button type="danger" @click="changePassword">保存修改</el-button></el-form-item>
+              </el-form>
+            </div>
 
-          <div class="card">
-            <div style="font-size:16px;font-weight:600;margin-bottom:6px">新笔记推送</div>
-            <div style="font-size:12px;color:#8a919f;margin-bottom:18px">博主发布新笔记时，自动推送「笔记标题 + 链接」到下方启用的渠道</div>
-            <div style="margin-bottom:16px;display:flex;align-items:center;gap:12px">
-              <span>启用推送</span>
-              <el-switch v-model="notifyConfig.enabled"></el-switch>
-            </div>
-            <div v-for="ch in notifyChannels" :key="ch.key" style="padding:16px 0;border-top:1px solid #f0f0f0">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-                <div>
-                  <span style="font-weight:600;margin-right:8px">{{ch.name}}</span>
-                  <span style="font-size:12px;color:#8a919f">{{ch.tip}}</span>
-                </div>
-                <el-switch v-model="notifyConfig.channels[ch.key].enabled"></el-switch>
+            <div class="card">
+              <div class="card-head">新笔记推送</div>
+              <div class="card-desc">博主发布新笔记时，自动推送「笔记标题 + 链接」到下方启用的渠道</div>
+              <div class="panel-sub" style="display:flex;align-items:center;gap:12px">
+                <el-switch v-model="notifyConfig.enabled"></el-switch>
+                <span style="font-size:13px;color:#303133">启用推送</span>
+                <span style="font-size:12px;color:#8a919f">关闭后所有渠道均不发送</span>
               </div>
-              <div v-if="notifyConfig.channels[ch.key].enabled">
-                <div v-for="f in ch.fields" :key="f.k" style="margin-bottom:10px">
-                  <div style="font-size:13px;color:#606266;margin-bottom:4px">{{f.label}}</div>
-                  <el-input v-if="f.k==='webhook'" v-model="notifyConfig.channels[ch.key][f.k]" type="textarea" :rows="2" :placeholder="f.ph"></el-input>
-                  <el-input v-else v-model="notifyConfig.channels[ch.key][f.k]" :placeholder="f.ph"></el-input>
+              <div class="notify-list">
+                <div v-for="ch in notifyChannels" :key="ch.key" class="notify-item">
+                  <div class="notify-head" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+                    <div style="min-width:0">
+                      <span style="font-weight:600;margin-right:8px">{{ch.name}}</span>
+                      <span style="font-size:12px;color:#8a919f">{{ch.tip}}</span>
+                    </div>
+                    <el-switch v-model="notifyConfig.channels[ch.key].enabled"></el-switch>
+                  </div>
+                  <div v-if="notifyConfig.channels[ch.key].enabled">
+                    <div v-for="f in ch.fields" :key="f.k" style="margin-bottom:10px">
+                      <div style="font-size:13px;color:#606266;margin-bottom:4px">{{f.label}}</div>
+                      <el-input v-if="f.k==='webhook'" v-model="notifyConfig.channels[ch.key][f.k]" type="textarea" :rows="2" :placeholder="f.ph"></el-input>
+                      <el-input v-else v-model="notifyConfig.channels[ch.key][f.k]" :placeholder="f.ph"></el-input>
+                    </div>
+                  </div>
                 </div>
               </div>
-            </div>
-            <div style="margin-top:18px;display:flex;gap:10px">
-              <el-button @click="testNotify">发送测试</el-button>
-              <el-button type="danger" @click="saveNotifyConfig">保存配置</el-button>
+              <div class="notify-actions" style="margin-top:18px;display:flex;gap:10px">
+                <el-button @click="testNotify">发送测试</el-button>
+                <el-button type="danger" @click="saveNotifyConfig">保存配置</el-button>
+              </div>
             </div>
           </div>
         </div>
 
+        </div>
       </el-main>
     </el-container>
   </el-container>
@@ -291,51 +487,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
   <el-dialog v-model="accountDialogVisible" :title="cookieUpdateId ? '更新账号登录态' : '添加小红书账号'" width="560px"
              :class="{ 'wide-login': accountTab === 'browser' }" @close="resetAccountDialog">
     <el-tabs v-model="accountTab">
-      <el-tab-pane label="扫码登录" name="qrcode">
-        <el-alert type="warning" :closable="false" show-icon style="margin-bottom:14px">
-          <template #title>可能受风控影响</template>
-          <div style="font-size:12px;line-height:1.7">服务器直连的登录接口有概率被小红书风控拦截（提示「二维码最终登录状态无效」）。若失败请改用「浏览器登录」。</div>
-        </el-alert>
-        <div style="text-align:center;padding:10px 0 4px">
-          <div v-if="!qrImage">
-            <el-button type="danger" :loading="qrLoading" @click="startQrcodeLogin">生成二维码</el-button>
-            <div style="font-size:12px;color:#8a919f;margin-top:14px">点击生成后，用小红书 App 扫码并在手机上确认登录</div>
-          </div>
-          <div v-else>
-            <img :src="qrImage" style="width:188px;height:188px;border:1px solid #ebeef5;border-radius:8px;padding:6px;background:#fff">
-            <div :style="{marginTop:'10px',fontSize:'13px',color:qrStatusColor}">{{ qrStatusText }}</div>
-            <div style="margin-top:10px">
-              <el-button size="small" :loading="qrLoading" @click="startQrcodeLogin">重新生成二维码</el-button>
-              <el-button v-if="(qrStatusText||'').indexOf('无效') >= 0" size="small" type="success" @click="useBrowserLogin">改用浏览器登录</el-button>
-            </div>
-          </div>
-        </div>
-      </el-tab-pane>
-
-      <el-tab-pane label="手机验证码" name="phone">
-        <el-alert type="warning" :closable="false" show-icon style="margin-bottom:14px">
-          <template #title>可能收不到短信</template>
-          <div style="font-size:12px;line-height:1.7">服务器直连发送验证码时，小红书可能返回成功但不下发短信（风控）。若收不到请改用「浏览器登录」。</div>
-        </el-alert>
-        <el-form label-width="80px">
-          <el-form-item label="手机号">
-            <el-input v-model="phoneForm.phone" placeholder="请输入手机号" maxlength="11">
-              <template #prepend>+86</template>
-            </el-input>
-          </el-form-item>
-          <el-form-item label="验证码">
-            <el-input v-model="phoneForm.code" placeholder="6 位验证码" maxlength="6">
-              <template #append>
-                <el-button :disabled="phoneCountdown" @click="sendPhoneCode">{{ phoneCountdown ? phoneCountdown + ' 秒' : '发送验证码' }}</el-button>
-              </template>
-            </el-input>
-          </el-form-item>
-          <el-form-item label="账号名"><el-input v-model="phoneForm.name" placeholder="可选，留空自动用昵称"></el-input></el-form-item>
-          <el-button type="danger" style="width:100%" :loading="phoneLoading" @click="submitPhoneLogin">登录并添加账号</el-button>
-          <div v-if="phoneStatusText" style="margin-top:10px;font-size:13px;color:#e6a23c;text-align:center">{{ phoneStatusText }}</div>
-        </el-form>
-      </el-tab-pane>
-
       <el-tab-pane label="Cookie 导入" name="cookie">
         <el-alert v-if="cookieUpdateId" type="info" :closable="false" show-icon style="margin-bottom:14px">
           <template #title>正在更新已有账号的登录态</template>
@@ -347,17 +498,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
         </el-form>
         <el-button type="danger" style="width:100%" :loading="saving" @click="saveAccount">{{ cookieUpdateId ? '保存并更新登录态' : '保存并检测' }}</el-button>
       </el-tab-pane>
-
-      <!-- 二维码特写（浏览器登录画面里的二维码放大图） -->
-      <el-dialog v-model="qrCloseupVisible" title="扫码登录 — 二维码特写" width="420px" align-center>
-        <img v-if="qrCloseImage" :src="qrCloseImage" style="display:block;width:260px;height:auto;margin:0 auto;border:1px solid #ebeef5;border-radius:8px;background:#fff">
-        <div style="margin-top:12px;text-align:center;font-size:12px;color:#8a919f;line-height:1.7">
-          用手机「小红书」App 扫这张码即可登录。<br>二维码会随画面刷新，若已过期请关闭后重新打开登录页。
-        </div>
-        <template #footer>
-          <el-button @click="qrCloseupVisible=false">关闭</el-button>
-        </template>
-      </el-dialog>
 
       <el-tab-pane label="浏览器登录" name="browser">
         <div style="padding:4px 0">
@@ -373,7 +513,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
             <el-button v-if="browserRunning && !browserChecking" type="success" size="large" :loading="browserChecking" @click="checkBrowserLogin">完成登录，读取登录态</el-button>
             <el-button v-if="browserRunning" size="small" @click="stopBrowserLogin">关闭</el-button>
             <div :style="{marginTop:'10px',fontSize:'13px',color:browserStatusColor}">{{ browserStatusText || '点击按钮，登录页将显示在下方画面中' }}</div>
-            <div v-show="browserRunning" style="margin:8px auto 0;display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap">
+            <div v-show="browserRunning" class="frame-zoom" style="margin:8px auto 0;display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap">
               <span style="font-size:12px;color:#8a919f">画面大小</span>
               <el-radio-group v-model="frameZoom" size="small" @change="restartFrameStream">
                 <el-radio-button value="fit">适应宽度</el-radio-button>
@@ -385,7 +525,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
               <el-button size="small" type="success" :loading="qrCloseLoading" @click="openQrCloseup">二维码特写</el-button>
             </div>
           </div>
-          <div v-show="browserRunning" style="width:100%;max-width:1180px;margin:8px auto;background:#fff;border:1px solid #dcdfe6;border-radius:8px;overflow:auto">
+          <div v-show="browserRunning" style="width:100%;max-width:1180px;margin:8px auto;background:#fff;border:1px solid #dcdfe6;border-radius:8px;overflow:auto;-webkit-overflow-scrolling:touch">
             <div :style="frameBoxStyle">
             <img id="loginFrame" :src="frameDataUrl" tabindex="0" @load="frameLoaded"
                  :style="frameImgStyle"
@@ -400,11 +540,23 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
             </div>
           </div>
           <div v-show="browserRunning" style="max-width:1180px;margin:0 auto;padding:6px 12px;font-size:12px;color:#8a919f;text-align:center">
-            上方为服务端登录页实时画面（高清图）— 直接用鼠标点击操作（点输入框可打字，可滚动）；画面看不清就调「画面大小」或点「二维码特写」用手机扫；放大后可用鼠标拖动画面查看；登录完成后点上方「完成登录」按钮
+            上方为服务端登录页实时画面（高清图）— 直接点击操作（点输入框可打字，可滚动）；画面看不清就调「画面大小」或点「二维码特写」用手机扫；登录完成后点上方「完成登录」按钮
           </div>
         </div>
       </el-tab-pane>
     </el-tabs>
+  </el-dialog>
+
+  <!-- 二维码特写（浏览器登录画面里的二维码放大图） -->
+  <el-dialog v-model="qrCloseupVisible" title="扫码登录 — 二维码特写" width="420px" align-center
+             append-to-body>
+    <img v-if="qrCloseImage" :src="qrCloseImage" style="display:block;width:260px;max-width:78vw;height:auto;margin:0 auto;border:1px solid #ebeef5;border-radius:8px;background:#fff">
+    <div style="margin-top:12px;text-align:center;font-size:12px;color:#8a919f;line-height:1.7">
+      用手机「小红书」App 扫这张码即可登录。<br>二维码会随画面刷新，若已过期请关闭后重新打开登录页。
+    </div>
+    <template #footer>
+      <el-button @click="qrCloseupVisible=false">关闭</el-button>
+    </template>
   </el-dialog>
 
   <!-- 添加/编辑博主弹窗 -->
@@ -421,6 +573,24 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
       <el-form-item label="轮巡间隔">
         <el-input-number v-model="bloggerForm.interval_minutes" :min="1" :max="10080"></el-input-number>
         <span style="margin-left:10px;font-size:12px;color:#8a919f">分钟</span>
+      </el-form-item>
+      <el-form-item label="监控时段">
+        <div class="time-range">
+          <el-switch v-model="bloggerForm.windowOn"></el-switch>
+          <span v-if="bloggerForm.windowOn" class="time-range-inputs">
+            <el-time-picker
+              v-model="bloggerForm.monitor_start"
+              value-format="HH:mm" format="HH:mm" placeholder="开始"
+              style="width:120px"></el-time-picker>
+            <span style="color:#8a919f;margin:0 6px">—</span>
+            <el-time-picker
+              v-model="bloggerForm.monitor_end"
+              value-format="HH:mm" format="HH:mm" placeholder="结束"
+              style="width:120px"></el-time-picker>
+          </span>
+          <span v-else style="font-size:12px;color:#8a919f">关闭时全天监控</span>
+        </div>
+        <div class="time-hint">仅在时段内抓取；结束早于开始视为跨天（如 22:00—06:00）</div>
       </el-form-item>
     </el-form>
     <template #footer>
@@ -440,6 +610,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
         <span style="font-size:13px;color:#606266">轮巡间隔</span>
         <el-input-number v-model="followImportInterval" :min="1" :max="10080"></el-input-number>
         <span style="font-size:13px;color:#8a919f">分钟</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:13px;color:#606266">监控时段</span>
+        <el-switch v-model="followImportWindowOn"></el-switch>
+        <span v-if="followImportWindowOn" class="time-range-inputs">
+          <el-time-picker v-model="followImportStart" value-format="HH:mm" format="HH:mm" placeholder="开始" style="width:115px"></el-time-picker>
+          <span style="font-size:13px;color:#8a919f;margin:0 6px">—</span>
+          <el-time-picker v-model="followImportEnd" value-format="HH:mm" format="HH:mm" placeholder="结束" style="width:115px"></el-time-picker>
+        </span>
+        <span v-else style="font-size:13px;color:#8a919f">全天监控</span>
       </div>
     </div>
     <el-table :data="followItems" max-height="420" @selection-change="onFollowSelectionChange" empty-text="选择账号后点击「获取关注列表」">
@@ -469,6 +649,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
         <el-input-number v-model="batchForm.interval_minutes" :min="1" :max="10080"></el-input-number>
         <span style="margin-left:10px;font-size:12px;color:#8a919f">分钟</span>
       </el-form-item>
+      <el-form-item label="监控时段">
+        <el-radio-group v-model="batchForm.windowMode" size="small">
+          <el-radio-button label="keep">不修改</el-radio-button>
+          <el-radio-button label="set">设置为</el-radio-button>
+          <el-radio-button label="clear">全天</el-radio-button>
+        </el-radio-group>
+        <div v-if="batchForm.windowMode==='set'" class="time-range" style="margin-top:10px">
+          <el-time-picker v-model="batchForm.monitor_start" value-format="HH:mm" format="HH:mm" placeholder="开始" style="width:120px"></el-time-picker>
+          <span style="color:#8a919f">—</span>
+          <el-time-picker v-model="batchForm.monitor_end" value-format="HH:mm" format="HH:mm" placeholder="结束" style="width:120px"></el-time-picker>
+        </div>
+      </el-form-item>
     </el-form>
     <div style="font-size:12px;color:#8a919f">将应用到选中的 {{bloggerSelection.length}} 个博主</div>
     <template #footer>
@@ -494,6 +686,8 @@ const app = Vue.createApp({
       logging: false,
       activeTab: 'accounts',
       sidebarCollapse: false,
+      sidebarOpen: false,   // 手机端抽屉是否展开
+      isMobile: false,      // 当前是否窄屏（<768px）
       // 账号
       accounts: [],
       accountDialogVisible: false,
@@ -516,33 +710,23 @@ const app = Vue.createApp({
       qrCloseImage: '',
       qrCloseLoading: false,
       pendingEvents: [],
-      qrImage: '',
-      qrLoading: false,
-      qrStatusText: '',
-      qrStatusColor: '#8a919f',
-      qrSessionId: '',
-      qrTimer: null,
-      qrPersistAt: 0,
-      phoneForm: { phone: '', code: '', name: '' },
-      phoneSessionId: '',
-      phoneLoading: false,
-      phoneStatusText: '',
-      phoneCountdown: 0,
-      phoneTimer: null,
       // 博主
       bloggers: [],
       bloggerDialogVisible: false,
       bloggerEditId: null,
-      bloggerForm: { name: '', url: '', account_id: null, interval_minutes: 60 },
+      bloggerForm: { name: '', url: '', account_id: null, interval_minutes: 60, windowOn: false, monitor_start: '', monitor_end: '' },
       followImportVisible: false,
       followImportAccountId: null,
       followItems: [],
       followSelection: [],
       followLoading: false,
       followImportInterval: 60,
+      followImportWindowOn: false,
+      followImportStart: '',
+      followImportEnd: '',
       bloggerSelection: [],
       batchDialogVisible: false,
-      batchForm: { account_id: null, interval_minutes: 60 },
+      batchForm: { account_id: null, interval_minutes: 60, windowMode: 'keep', monitor_start: '', monitor_end: '' },
       // 笔记
       notes: [],
       notesTotal: 0,
@@ -592,12 +776,11 @@ const app = Vue.createApp({
   },
   mounted() {
     if (this.token) this.checkAuth();
-    // 窄屏首次打开自动折叠侧边栏
-    this.sidebarCollapse = window.innerWidth < 768;
+    this.onResize();
+    window.addEventListener('resize', this.onResize);
   },
   beforeUnmount() {
-    if (this.qrTimer) clearInterval(this.qrTimer);
-    if (this.phoneTimer) clearInterval(this.phoneTimer);
+    window.removeEventListener('resize', this.onResize);
     if (this.browserTimer) clearInterval(this.browserTimer);
     this.stopFrameStream();
   },
@@ -637,7 +820,22 @@ const app = Vue.createApp({
       await Promise.all([this.loadAccounts(), this.loadBloggers()]);
       await this.loadNotes();
     },
-    switchTab(name) { this.activeTab = name; if (name==='notes') this.loadNotes(); if (name==='settings') this.loadNotifyConfig(); },
+    /* 响应式：窗口尺寸变化时同步断点状态 */
+    onResize() {
+      const mobile = window.innerWidth < 768;
+      if (mobile !== this.isMobile) {
+        this.isMobile = mobile;
+        // 进入手机模式：侧边栏收起为抽屉；回到桌面：恢复展开
+        this.sidebarOpen = false;
+        this.sidebarCollapse = mobile;
+      }
+    },
+    switchTab(name) {
+      this.activeTab = name;
+      if (this.isMobile) this.sidebarOpen = false;  // 手机端点完自动收起抽屉
+      if (name==='notes') this.loadNotes();
+      if (name==='settings') this.loadNotifyConfig();
+    },
 
     /* 账号 */
     async loadAccounts() { const d = await this.api('/api/accounts'); this.accounts = d.items || []; },
@@ -649,7 +847,7 @@ const app = Vue.createApp({
     openUpdateCookie(row) {
       this.cookieUpdateId = row.id;
       this.accountForm = { name: row.name, cookie: '' };
-      this.accountTab = 'browser';
+      this.accountTab = 'cookie';
       this.accountDialogVisible = true;
       this.refreshBrowserState();
     },
@@ -844,160 +1042,11 @@ const app = Vue.createApp({
       this.browserStatusColor = '#8a919f';
     },
     resetAccountDialog() {
-      this.stopQrPolling();
       this.stopBrowserPolling();
       this.stopFrameStream();
-      if (this.phoneTimer) { clearInterval(this.phoneTimer); this.phoneTimer = null; }
-      this.phoneCountdown = 0;
-      this.qrImage = ''; this.qrSessionId = ''; this.qrStatusText = ''; this.qrStatusColor = '#8a919f';
-      this.phoneForm = { phone: '', code: '', name: '' };
-      this.phoneSessionId = '';
       this.accountForm = { name: '', cookie: '' };
       this.accountTab = 'cookie';
       this.cookieUpdateId = null;
-    },
-    stopQrPolling() {
-      if (this.qrTimer) { clearInterval(this.qrTimer); this.qrTimer = null; }
-    },
-    async startQrcodeLogin() {
-      this.qrLoading = true;
-      this.qrStatusText = '正在生成二维码…';
-      this.qrStatusColor = '#8a919f';
-      try {
-        const d = await this.api('/api/accounts/qrcode/start', 'POST');
-        if (!d.ok) {
-          this.qrStatusText = d.error || '二维码生成失败';
-          this.qrStatusColor = '#f56c6c';
-          return;
-        }
-        this.qrSessionId = d.session_id;
-        this.qrImage = d.qr_image;
-        this.qrStatusText = '请用小红书 App 扫码，并在手机上点「确认登录」';
-        this.startQrPolling();
-      } catch (e) {
-        this.qrStatusText = '二维码生成失败';
-        this.qrStatusColor = '#f56c6c';
-      } finally { this.qrLoading = false; }
-    },
-    // 直连扫码被风控时，一键切到内嵌浏览器登录（最可靠）
-    useBrowserLogin() {
-      this.stopQrPolling();
-      this.qrImage = '';
-      this.qrSessionId = '';
-      this.qrStatusText = '';
-      this.accountTab = 'browser';
-      this.startBrowserLogin();
-    },
-    startQrPolling() {
-      this.stopQrPolling();
-      this.qrPersistAt = 0;
-      this.qrTimer = setInterval(async () => {
-        if (!this.qrSessionId) return;
-        try {
-          const r = await this.api('/api/accounts/qrcode/poll?session_id=' + encodeURIComponent(this.qrSessionId));
-          if (r.status === 'confirmed' && r.persisting && !this.qrPersistAt) this.qrPersistAt = Date.now();
-          // 「正在校验登录态」必须带秒数，否则用户看到的就是「显示登录成功但没反应」
-          if (this.qrPersistAt) {
-            const sec = Math.round((Date.now() - this.qrPersistAt) / 1000);
-            this.qrStatusText = (r.message || '正在校验登录态…') + '（已等待 ' + sec + ' 秒，通常 5-20 秒）';
-          } else {
-            this.qrStatusText = r.message || '';
-          }
-          if (r.status === 'scanned') this.qrStatusColor = '#e6a23c';
-          else if (r.status === 'confirmed') this.qrStatusColor = '#67c23a';
-          else if (r.status === 'expired' || r.status === 'error') this.qrStatusColor = '#f56c6c';
-          else this.qrStatusColor = '#8a919f';
-          // 校验挂太久：前端自己兜底收尾，别让用户干等
-          if (this.qrPersistAt && Date.now() - this.qrPersistAt > 150000) {
-            this.stopQrPolling();
-            ElMessage.error('校验登录态超时（>2.5 分钟），请改用「浏览器登录」页内扫码');
-            return;
-          }
-          if (r.status === 'confirmed') {
-            // 登录成功但入库校验还在后台跑：停在「校验中」，等 persist_done
-            if (r.account) {
-              this.stopQrPolling();
-              ElMessage.success('登录成功：' + (r.account.nickname || r.account.name));
-              this.accountDialogVisible = false;
-              this.loadAccounts();
-            } else if (r.persist_failed) {
-              this.stopQrPolling();
-              ElMessage.error(r.message || '登录态校验未通过');
-            } else if (!r.persisting) {
-              this.stopQrPolling();
-              ElMessage.warning(r.message || '登录成功');
-            }
-            // persisting 且无 account：保持轮询，下轮取入库结果
-          } else if (r.status === 'expired' || r.status === 'error') {
-            this.stopQrPolling();
-          }
-        } catch (e) { /* 网络抖动，下一轮继续 */ }
-      }, 2000);
-    },
-    async sendPhoneCode() {
-      const phone = (this.phoneForm.phone || '').trim();
-      if (!/^1\d{10}$/.test(phone)) { ElMessage.warning('请输入正确的 11 位手机号'); return; }
-      const d = await this.api('/api/accounts/phone/send', 'POST', { phone, zone: '86' });
-      if (!d.ok) { ElMessage.error(d.message || '验证码发送失败'); return; }
-      this.phoneSessionId = d.session_id;
-      ElMessage.success('验证码已发送');
-      this.phoneCountdown = 60;
-      if (this.phoneTimer) clearInterval(this.phoneTimer);
-      this.phoneTimer = setInterval(() => {
-        this.phoneCountdown -= 1;
-        if (this.phoneCountdown <= 0) { clearInterval(this.phoneTimer); this.phoneTimer = null; }
-      }, 1000);
-    },
-    async submitPhoneLogin() {
-      const phone = (this.phoneForm.phone || '').trim();
-      const code = (this.phoneForm.code || '').trim();
-      if (!this.phoneSessionId) { ElMessage.warning('请先获取验证码'); return; }
-      if (!code) { ElMessage.warning('请输入验证码'); return; }
-      this.phoneLoading = true;
-      try {
-        const d = await this.api('/api/accounts/phone/verify', 'POST', {
-          session_id: this.phoneSessionId, phone, code, zone: '86', name: this.phoneForm.name,
-        });
-        if (!d.ok && !d.persisting) {
-          ElMessage.error(d.message || '登录失败');
-          return;
-        }
-        if (d.account) {
-          ElMessage.success('登录成功：' + (d.account.nickname || d.account.name));
-          this.accountDialogVisible = false;
-          this.loadAccounts();
-          return;
-        }
-        // 登录成功、后台正在校验入库：轮询结果接口直到出结果
-        this.phoneStatusText = d.message || '登录成功，正在校验登录态…';
-        const sid = this.phoneSessionId;
-        const startedAt = Date.now();
-        const timer = setInterval(async () => {
-          // 超时兜底：后端超时后会返回 failed 结论，这里再防一层前端卡死
-          if (Date.now() - startedAt > 160000) {
-            clearInterval(timer);
-            this.phoneLoading = false;
-            ElMessage.error('校验登录态超时，请改用「浏览器登录」页内扫码');
-            return;
-          }
-          try {
-            const r = await this.api('/api/accounts/phone/verify/result?session_id=' + encodeURIComponent(sid));
-            const sec = Math.round((Date.now() - startedAt) / 1000);
-            this.phoneStatusText = (r.message || '') + '（已等待 ' + sec + ' 秒）';
-            if (r.status === 'ok' && r.account) {
-              clearInterval(timer);
-              this.phoneLoading = false;
-              ElMessage.success('登录成功：' + (r.account.nickname || r.account.name));
-              this.accountDialogVisible = false;
-              this.loadAccounts();
-            } else if (r.status === 'failed') {
-              clearInterval(timer);
-              this.phoneLoading = false;
-              ElMessage.error(r.message || '登录态校验未通过');
-            }
-          } catch (e) { /* 继续 */ }
-        }, 2000);
-      } finally { /* phoneLoading 由结果轮询负责关闭 */ }
     },
     async saveAccount() {
       if (!this.accountForm.cookie.trim()) { ElMessage.warning('请粘贴 Cookie'); return; }
@@ -1028,16 +1077,40 @@ const app = Vue.createApp({
 
     /* 博主 */
     async loadBloggers() { const d = await this.api('/api/bloggers'); this.bloggers = d.items || []; },
+    windowText(row) {
+      const s = row.monitor_start || '', e = row.monitor_end || '';
+      if (!s && !e) return '全天';
+      if (s && e) return s + ' — ' + e;
+      if (s) return s + ' 起';
+      return '至 ' + e;
+    },
     openBloggerDialog(row) {
       this.bloggerEditId = row ? row.id : null;
-      if (row) this.bloggerForm = { name: row.name, url: row.url, account_id: row.account_id, interval_minutes: row.interval_minutes };
-      else this.bloggerForm = { name: '', url: '', account_id: null, interval_minutes: 60 };
+      if (row) {
+        const s = row.monitor_start || '', e = row.monitor_end || '';
+        this.bloggerForm = {
+          name: row.name, url: row.url, account_id: row.account_id,
+          interval_minutes: row.interval_minutes,
+          windowOn: !!(s || e), monitor_start: s, monitor_end: e,
+        };
+      } else {
+        this.bloggerForm = { name: '', url: '', account_id: null, interval_minutes: 60, windowOn: false, monitor_start: '', monitor_end: '' };
+      }
       this.bloggerDialogVisible = true;
     },
     async saveBlogger() {
       if (!this.bloggerForm.url.trim()) { ElMessage.warning('请填写主页链接'); return; }
+      const f = this.bloggerForm;
+      if (f.windowOn && !f.monitor_start && !f.monitor_end) { ElMessage.warning('请选择监控时段的开始与结束时间'); return; }
+      if (f.windowOn && f.monitor_start && f.monitor_end && f.monitor_start === f.monitor_end) {
+        ElMessage.warning('开始与结束时间不能相同'); return;
+      }
       this.saving = true;
-      const body = { name: this.bloggerForm.name, url: this.bloggerForm.url, account_id: this.bloggerForm.account_id, interval_minutes: this.bloggerForm.interval_minutes };
+      const body = {
+        name: f.name, url: f.url, account_id: f.account_id, interval_minutes: f.interval_minutes,
+        monitor_start: f.windowOn ? (f.monitor_start || '') : '',
+        monitor_end: f.windowOn ? (f.monitor_end || '') : '',
+      };
       try {
         if (this.bloggerEditId) {
           await this.api('/api/bloggers/' + this.bloggerEditId, 'PUT', body);
@@ -1050,9 +1123,14 @@ const app = Vue.createApp({
       } finally { this.saving = false; }
     },
     async refreshBlogger(row) {
-      const d = await this.api('/api/bloggers/' + row.id + '/refresh', 'POST');
-      if (d.ok) ElMessage.success('抓取完成，新增 ' + d.new_count + ' 条笔记');
-      else ElMessage.error('抓取失败：' + (d.error || ''));
+      const d = await this.api('/api/bloggers/' + row.id + '/refresh?force=true', 'POST');
+      if (d.skipped_by_window) {
+        ElMessage.warning('当前不在监控时段（' + this.windowText(row) + '），已跳过抓取');
+      } else if (d.ok) {
+        ElMessage.success('抓取完成，新增 ' + d.new_count + ' 条笔记');
+      } else {
+        ElMessage.error('抓取失败：' + (d.error || ''));
+      }
       this.loadBloggers();
     },
     deleteBlogger(row) {
@@ -1064,6 +1142,7 @@ const app = Vue.createApp({
       this.followImportVisible = true;
       this.followItems = []; this.followSelection = []; this.followImportAccountId = null;
       this.followImportInterval = 60;
+      this.followImportWindowOn = false; this.followImportStart = ''; this.followImportEnd = '';
     },
     async fetchFollowings() {
       if (!this.followImportAccountId) { ElMessage.warning('请先选择账号'); return; }
@@ -1078,7 +1157,18 @@ const app = Vue.createApp({
     canSelectRow(row) { return !row.already; },
     async importFollowings() {
       if (!this.followSelection.length) { ElMessage.warning('请勾选要导入的博主'); return; }
-      const d = await this.api('/api/bloggers/import-followings', 'POST', { account_id: this.followImportAccountId, items: this.followSelection, interval_minutes: this.followImportInterval });
+      if (this.followImportWindowOn && !this.followImportStart && !this.followImportEnd) {
+        ElMessage.warning('请选择监控时段的开始与结束时间'); return;
+      }
+      if (this.followImportWindowOn && this.followImportStart && this.followImportStart === this.followImportEnd) {
+        ElMessage.warning('开始与结束时间不能相同'); return;
+      }
+      const d = await this.api('/api/bloggers/import-followings', 'POST', {
+        account_id: this.followImportAccountId, items: this.followSelection,
+        interval_minutes: this.followImportInterval,
+        monitor_start: this.followImportWindowOn ? (this.followImportStart || '') : '',
+        monitor_end: this.followImportWindowOn ? (this.followImportEnd || '') : '',
+      });
       ElMessage.success('导入完成：新增 ' + d.imported + ' 个，跳过 ' + d.skipped + ' 个');
       this.followImportVisible = false;
       this.loadBloggers();
@@ -1086,11 +1176,25 @@ const app = Vue.createApp({
     onBloggerSelectionChange(rows) { this.bloggerSelection = rows; },
     openBatchDialog() {
       if (!this.bloggerSelection.length) { ElMessage.warning('请先勾选博主'); return; }
-      this.batchForm = { account_id: null, interval_minutes: 60 };
+      this.batchForm = { account_id: null, interval_minutes: 60, windowMode: 'keep', monitor_start: '', monitor_end: '' };
       this.batchDialogVisible = true;
     },
     async saveBatch() {
-      const d = await this.api('/api/bloggers/batch-update', 'POST', { ids: this.bloggerSelection.map(b => b.id), account_id: this.batchForm.account_id, interval_minutes: this.batchForm.interval_minutes });
+      const f = this.batchForm;
+      if (f.windowMode === 'set') {
+        if (!f.monitor_start && !f.monitor_end) { ElMessage.warning('请选择监控时段的开始与结束时间'); return; }
+        if (f.monitor_start && f.monitor_start === f.monitor_end) { ElMessage.warning('开始与结束时间不能相同'); return; }
+      }
+      const body = {
+        ids: this.bloggerSelection.map(b => b.id),
+        interval_minutes: f.interval_minutes,
+        clear_window: f.windowMode === 'clear',
+      };
+      if (f.windowMode === 'set') {
+        body.monitor_start = f.monitor_start || '';
+        body.monitor_end = f.monitor_end || '';
+      }
+      const d = await this.api('/api/bloggers/batch-update', 'POST', body);
       ElMessage.success('已更新 ' + d.updated + ' 个博主');
       this.batchDialogVisible = false;
       this.loadBloggers();

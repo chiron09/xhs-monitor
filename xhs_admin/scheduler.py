@@ -98,15 +98,63 @@ def _passes_new_filter(note: dict, monitor_since: int) -> bool:
     return _is_published_today(pt) and _is_after_monitor_since(pt, monitor_since)
 
 
-def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False) -> dict:
+def _parse_hhmm(value: str):
+    """把 'HH:MM' 解析为当天的分钟数（0~1439）；格式非法返回 None。"""
+    if not value:
+        return None
+    try:
+        hh, mm = str(value).strip().split(":")
+        h, m = int(hh), int(mm)
+    except (ValueError, AttributeError):
+        return None
+    if 0 <= h <= 23 and 0 <= m <= 59:
+        return h * 60 + m
+    return None
+
+
+def in_monitor_window(blogger, now: datetime | None = None) -> bool:
+    """当前是否落在博主的监控时段内。
+
+    两端为空 → 全天放行（兼容历史博主）。
+    只填一端 → 视为从该时刻开始 / 到该时刻结束。
+    start > end → 跨天时段（如 22:00-06:00）。
+    """
+    start_raw = (getattr(blogger, "monitor_start", "") or "").strip()
+    end_raw = (getattr(blogger, "monitor_end", "") or "").strip()
+    if not start_raw and not end_raw:
+        return True
+
+    start = _parse_hhmm(start_raw)
+    end = _parse_hhmm(end_raw)
+    if start is None and end is None:
+        return True  # 配置非法，不阻断监控
+    if start is None:
+        start = 0
+    if end is None:
+        end = 24 * 60 - 1
+
+    now = now or datetime.now()
+    cur = now.hour * 60 + now.minute
+    if start <= end:
+        return start <= cur <= end
+    # 跨天：22:00-06:00 → [22:00, 24:00) ∪ [00:00, 06:00]
+    return cur >= start or cur <= end
+
+
+def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False,
+                    force: bool = False) -> dict:
     """抓取一个博主，识别新笔记并入库。
 
     establish_baseline=True 时只建立基线不入库（用于添加博主那一刻）。
+    force=True 时忽略监控时段（用户手动点「抓取」时使用）。
     入库条件（同时满足）：① 不在基线中；② 今天发布；③ 晚于监控起点。
     """
     blogger = db.get(Blogger, blogger_id)
     if not blogger:
         return {"ok": False, "error": "博主不存在"}
+
+    if not force and not establish_baseline and not in_monitor_window(blogger):
+        return {"ok": False, "error": "当前不在监控时段", "skipped_by_window": True}
 
     account = db.get(Account, blogger.account_id) if blogger.account_id else None
     if not account or not account.cookie:
@@ -194,12 +242,16 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False) ->
     db.commit()
 
     # 新笔记推送（失败不影响抓取结果）
+    # 时段只约束「定时轮巡」：时段外调度器不抓取，自然不会推送。
+    # 用户手动点「抓取」（force=True）是主动行为，抓到新笔记照常推送。
     notify_result = None
+    pushed = False
     if new_notes:
         try:
             notify_result = notifier.notify_new_notes(
                 notifier.get_config(db), blogger.name, new_notes
             )
+            pushed = True
         except Exception:  # noqa: BLE001
             notify_result = None
 
@@ -207,8 +259,8 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False) ->
         "ok": True,
         "crawled": len(normalized),
         "new_count": len(new_notes),
-        "skipped_count": skipped,
-        "baseline_count": len(current_ids),
+        "pushed": pushed,
+        "skipped_count": skipped,        "baseline_count": len(current_ids),
         "nickname": nickname,
         "notify": notify_result,
     }
@@ -222,9 +274,14 @@ def check_and_crawl() -> dict:
         now = datetime.now()
         bloggers = db.query(Blogger).filter(Blogger.status == "active").order_by(Blogger.id.asc()).all()
         crawled = 0
+        skipped_window = 0
         for b in bloggers:
             if crawled >= MAX_PER_ROUND:
                 break
+            # 监控时段之外：整轮跳过，不消耗限流名额
+            if not in_monitor_window(b, now):
+                skipped_window += 1
+                continue
             due = False
             if not b.last_crawled_at:
                 due = True
@@ -241,7 +298,7 @@ def check_and_crawl() -> dict:
         db.commit()
     finally:
         db.close()
-    return {"checked": len(results), "results": results}
+    return {"checked": len(results), "skipped_window": skipped_window, "results": results}
 
 
 _scheduler = None

@@ -61,6 +61,10 @@ class Blogger(Base):
     account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
     interval_minutes = Column(Integer, default=60)
     status = Column(String(16), default="active")  # active / paused
+    # 监控时段（抓取时段）：'HH:MM' 字符串，闭区间 [monitor_start, monitor_end]。
+    # 两端都为空 → 全天监控（兼容历史博主）；start > end 视为跨天（如 22:00-06:00）。
+    monitor_start = Column(String(8), default="")
+    monitor_end = Column(String(8), default="")
     baseline_note_ids = Column(Text, default="[]")  # JSON 列表
     # 监控起点（毫秒时间戳）：添加博主那一刻。
     # 只把此刻之后发布的笔记视为「新笔记」，避免把添加前的历史笔记推出去。
@@ -82,6 +86,8 @@ class Blogger(Base):
             "xhs_user_id": self.xhs_user_id,
             "account_id": self.account_id,
             "interval_minutes": self.interval_minutes,
+            "monitor_start": self.monitor_start or "",
+            "monitor_end": self.monitor_end or "",
             "status": self.status,
             "baseline_count": len(baseline),
             "monitor_since": self.monitor_since or 0,
@@ -150,7 +156,11 @@ def _ensure_columns() -> None:
     """轻量迁移：为已存在的旧表补新增列（SQLite 不支持自动加列）。"""
     import sqlite3
     wanted = {
-        "bloggers": [("monitor_since", "BIGINT DEFAULT 0")],
+        "bloggers": [
+            ("monitor_since", "BIGINT DEFAULT 0"),
+            ("monitor_start", "VARCHAR(8) DEFAULT ''"),
+            ("monitor_end", "VARCHAR(8) DEFAULT ''"),
+        ],
     }
     try:
         conn = sqlite3.connect(DB_PATH)

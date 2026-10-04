@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """小红书博主监控管理后台 —— FastAPI 主应用。"""
 import os
+import re
 import secrets
 import threading
 import time
@@ -126,24 +127,13 @@ class CookieUpdate(BaseModel):
     cookie: str = ""
 
 
-class PhoneSendRequest(BaseModel):
-    phone: str = Field(min_length=1)
-    zone: str = "86"
-
-
-class PhoneVerifyRequest(BaseModel):
-    session_id: str = Field(min_length=1)
-    phone: str = ""
-    code: str = Field(min_length=1)
-    zone: str = "86"
-    name: str = ""
-
-
 class BloggerCreate(BaseModel):
     name: str = ""
     url: str = Field(min_length=1)
     account_id: int | None = None
     interval_minutes: int = Field(default=60, ge=1, le=10080)
+    monitor_start: str = ""
+    monitor_end: str = ""
 
 
 class BloggerUpdate(BaseModel):
@@ -151,6 +141,8 @@ class BloggerUpdate(BaseModel):
     url: str | None = None
     account_id: int | None = None
     interval_minutes: int | None = Field(default=None, ge=1, le=10080)
+    monitor_start: str | None = None
+    monitor_end: str | None = None
     status: str | None = None
 
 
@@ -170,12 +162,44 @@ class ImportFollowingsRequest(BaseModel):
     account_id: int
     items: list[dict]
     interval_minutes: int = 60
+    monitor_start: str = ""
+    monitor_end: str = ""
 
 
 class BatchUpdateRequest(BaseModel):
     ids: list[int]
     account_id: int | None = None
     interval_minutes: int = Field(default=60, ge=1, le=10080)
+    # 只更新显式传入的字段：批量弹窗里没填的项保持原值不动
+    monitor_start: str | None = None
+    monitor_end: str | None = None
+    clear_window: bool = False
+
+
+_HHMM_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+def _norm_hhmm(value: str | None) -> str:
+    """把 'HH:MM' 规整成 'HH:MM'（补零）；空 → ''；非法 → 抛 400。"""
+    v = (value or "").strip()
+    if not v:
+        return ""
+    parts = v.split(":")
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail=f"时间格式应为 HH:MM，收到「{value}」")
+    try:
+        h, m = int(parts[0]), int(parts[1])
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"时间格式应为 HH:MM，收到「{value}」")
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        raise HTTPException(status_code=400, detail=f"时间超出范围（00:00-23:59）：「{value}」")
+    return f"{h:02d}:{m:02d}"
+
+
+def _check_window(start: str, end: str) -> None:
+    """时段合法性：单端可空；两端相同视为无意义配置，直接拒绝。"""
+    if start and end and start == end:
+        raise HTTPException(status_code=400, detail="监控时段的开始与结束时间不能相同（如需全天监控请都留空）")
 
 
 # ---------- 页面 ----------
@@ -412,167 +436,6 @@ def browser_login_stop(_=Depends(require_auth)):
     return {"ok": True}
 
 
-# ---- 扫码登录 ----
-# 扫码/手机登录会话的入库结果缓存：session_id -> {status, message, account}
-# （校验在后台线程跑，轮询接口立即返回；前端下一轮轮询时取到结果）
-_persist_results: dict = {}
-_persist_lock = threading.Lock()
-
-# 校验入库挂着不返回的上限：超过就给结论（否则前端永远停在「正在校验登录态…」，
-# 用户看到的就是「显示登录成功了但没反应」）
-PERSIST_TTL_SECONDS = 150
-
-HINT_BROWSER = "（建议改用「浏览器登录」页内扫码）"
-
-
-def _set_persist(key: str, entry: dict) -> None:
-    with _persist_lock:
-        _persist_results[key] = entry
-
-
-def _fail_persist(key: str, message: str) -> None:
-    _set_persist(key, {"status": "failed", "message": message, "account": None,
-                       "error": message, "ts": time.time()})
-
-
-def _watchdog(key: str) -> dict | None:
-    """pending 卡太久就补一个 failed 结论，避免前端无限等待。"""
-    with _persist_lock:
-        entry = _persist_results.get(key)
-        if not entry or entry.get("status") != "pending":
-            return entry
-        if time.time() - float(entry.get("ts", 0)) > PERSIST_TTL_SECONDS:
-            entry = {"status": "failed", "message": "校验登录态超时（小红书接口响应过慢），请重新扫码或用「浏览器登录」",
-                     "account": None, "error": "timeout", "ts": time.time()}
-            _persist_results[key] = entry
-            return entry
-        return entry
-
-
-def _persist_async(key: str, cookie: str, name: str, on_done) -> None:
-    """后台线程校验入库（SDK 校验要 5-20 秒，不能堵轮询请求）。
-
-    无论成功/失败/异常都必须落结论：前端靠这个结果收尾，没有结论就是「无反应」。
-    """
-    def _run():
-        if not cookie:
-            _fail_persist(key, "未取回登录 cookie" + HINT_BROWSER)
-            return
-        try:
-            saved = _persist_account(cookie, name)
-        except Exception as exc:  # noqa: BLE001
-            _fail_persist(key, f"校验登录态时出错：{exc}")
-            return
-        try:
-            on_done(saved)
-        except Exception:  # noqa: BLE001
-            pass
-    threading.Thread(target=_run, daemon=True).start()
-
-
-def _persist_latched(session_id: str, kind: str, cookie: str, name: str, when_done=None):
-    """确保同一登录会话只入库一次。立即返回；结果写进 _persist_results。"""
-    with _persist_lock:
-        if session_id in _persist_results:
-            return _persist_results[session_id]
-        _persist_results[session_id] = {"status": "pending", "message": "正在校验登录态…",
-                                        "account": None, "ts": time.time()}
-
-    def _done(saved: dict):
-        entry = {
-            "status": "ok" if saved.get("ok") else "failed",
-            "message": ("登录成功，账号已添加" if not saved.get("updated")
-                        else "登录成功，已更新原账号的登录态") if saved.get("ok")
-                       else "已登录，但账号校验未通过：" + (saved.get("error") or "未知原因"),
-            "account": saved.get("item"),
-            "error": saved.get("error", ""),
-            "ts": time.time(),
-        }
-        with _persist_lock:
-            _persist_results[session_id] = entry
-        if when_done:
-            try:
-                when_done(saved, entry)
-            except Exception:  # noqa: BLE001
-                pass
-
-    _persist_async(session_id, cookie, name, _done)
-    return _persist_results[session_id]
-
-
-@app.post("/api/accounts/qrcode/start")
-def start_qrcode_login(_=Depends(require_auth)):
-    ok, session_id, qr_image, err = xhs_client.start_qrcode_login()
-    return {"ok": ok, "session_id": session_id, "qr_image": qr_image, "error": err}
-
-
-@app.get("/api/accounts/qrcode/poll")
-def poll_qrcode_login(session_id: str, name: str = "", _=Depends(require_auth)):
-    result = xhs_client.poll_qrcode_login(session_id)
-    if result["status"] == "confirmed" and not result.get("account"):
-        # 入库不阻塞轮询：cookie 从会话取出后丢给后台线程，结果下轮轮询取
-        entry = _watchdog(session_id)
-        if entry is None:
-            cookie = xhs_client.session_cookie(session_id, "qrcode")
-            if not cookie:
-                # 已确认登录却没拿到 cookie：必须给结论，不能让前端停在「登录成功」干等
-                msg = "已确认登录，但没有取回 cookie（服务器直连常被风控）" + HINT_BROWSER
-                _fail_persist(session_id, msg)
-                return {"status": "error", "account": None, "persist_failed": True,
-                        "message": msg}
-            def _attach(saved: dict, _entry: dict):
-                if saved.get("item"):
-                    xhs_client.attach_session_account(session_id, saved["item"], "qrcode")
-            _persist_latched(session_id, "qrcode", cookie, name, _attach)
-            result["message"] = "登录成功，正在校验登录态…"
-            result["persisting"] = True
-        else:
-            result["persisting"] = True
-            result["message"] = entry.get("message") or result["message"]
-            if entry.get("status") == "ok" and entry.get("account"):
-                result["account"] = entry["account"]
-                result["persist_done"] = True
-            elif entry.get("status") == "failed":
-                result["persist_failed"] = True
-    return result
-
-
-# ---- 手机验证码登录 ----
-@app.post("/api/accounts/phone/send")
-def send_phone_code(req: PhoneSendRequest, _=Depends(require_auth)):
-    ok, session_id, message = xhs_client.start_phone_login(req.phone, req.zone)
-    return {"ok": ok, "session_id": session_id, "message": message}
-
-
-@app.post("/api/accounts/phone/verify")
-def verify_phone_code(req: PhoneVerifyRequest, _=Depends(require_auth)):
-    ok, cookie, message = xhs_client.submit_phone_login(req.session_id, req.phone, req.code, req.zone)
-    if not ok:
-        return {"ok": False, "message": message, "account": None, "persisting": False}
-    entry = _persist_latched(req.session_id, "phone", cookie, req.name)
-    if not cookie:
-        entry = {"status": "failed", "message": "未取回登录 cookie（服务器直连常被风控）" + HINT_BROWSER,
-                 "account": None, "error": "no cookie", "ts": time.time()}
-    if entry.get("status") == "pending":
-        return {"ok": True, "message": "登录成功，正在校验登录态…", "account": None, "persisting": True}
-    return {
-        "ok": entry.get("status") == "ok",
-        "message": entry.get("message") or "登录成功",
-        "error": entry.get("error", ""),
-        "account": entry.get("account"),
-        "persisting": False,
-    }
-
-
-@app.get("/api/accounts/phone/verify/result")
-def phone_verify_result(session_id: str, _=Depends(require_auth)):
-    """前端轮询取异步入库结果（超时也一定给结论，避免前端无限等待）。"""
-    entry = _watchdog(session_id)
-    if entry is None:
-        return {"status": "pending", "message": "正在校验登录态…", "account": None, "ts": time.time()}
-    return entry
-
-
 @app.delete("/api/accounts/{account_id}")
 def delete_account(account_id: int, _=Depends(require_auth)):
     db = SessionLocal()
@@ -629,12 +492,17 @@ def create_blogger(req: BloggerCreate, _=Depends(require_auth)):
         raise HTTPException(status_code=400, detail="链接无效：无法解析 user_id（应为 24 位十六进制）")
     db = SessionLocal()
     try:
+        m_start = _norm_hhmm(req.monitor_start)
+        m_end = _norm_hhmm(req.monitor_end)
+        _check_window(m_start, m_end)
         b = Blogger(
             name=req.name or uid,
             url=req.url.strip(),
             xhs_user_id=uid,
             account_id=req.account_id,
             interval_minutes=req.interval_minutes,
+            monitor_start=m_start,
+            monitor_end=m_end,
             status="active",
             monitor_since=int(datetime.now().timestamp() * 1000),
         )
@@ -675,6 +543,12 @@ def update_blogger(blogger_id: int, req: BloggerUpdate, _=Depends(require_auth))
             b.account_id = req.account_id
         if req.interval_minutes is not None:
             b.interval_minutes = req.interval_minutes
+        if req.monitor_start is not None or req.monitor_end is not None:
+            m_start = _norm_hhmm(req.monitor_start if req.monitor_start is not None else b.monitor_start)
+            m_end = _norm_hhmm(req.monitor_end if req.monitor_end is not None else b.monitor_end)
+            _check_window(m_start, m_end)
+            b.monitor_start = m_start
+            b.monitor_end = m_end
         if req.status is not None:
             b.status = req.status
         db.commit()
@@ -699,15 +573,18 @@ def delete_blogger(blogger_id: int, _=Depends(require_auth)):
 
 
 @app.post("/api/bloggers/{blogger_id}/refresh")
-def refresh_blogger_api(blogger_id: int, _=Depends(require_auth)):
+def refresh_blogger_api(blogger_id: int, force: bool = False, _=Depends(require_auth)):
+    """手动抓取：用户主动触发，不受监控时段限制（force=true），抓到新笔记照常推送。"""
     db = SessionLocal()
     try:
-        r = scheduler.refresh_blogger(db, blogger_id)
+        r = scheduler.refresh_blogger(db, blogger_id, force=force)
         b = db.get(Blogger, blogger_id)
         return {
             "ok": r["ok"],
             "error": r.get("error", ""),
+            "skipped_by_window": r.get("skipped_by_window", False),
             "new_count": r.get("new_count", 0),
+            "pushed": r.get("pushed", False),
             "item": b.to_dict() if b else None,
         }
     finally:
@@ -759,6 +636,9 @@ def list_followings(req: FollowingsListRequest, _=Depends(require_auth)):
 def import_followings(req: ImportFollowingsRequest, _=Depends(require_auth)):
     db = SessionLocal()
     try:
+        m_start = _norm_hhmm(req.monitor_start)
+        m_end = _norm_hhmm(req.monitor_end)
+        _check_window(m_start, m_end)
         existing = {b.xhs_user_id for b in db.query(Blogger).all()}
         imported = 0
         skipped = 0
@@ -773,6 +653,8 @@ def import_followings(req: ImportFollowingsRequest, _=Depends(require_auth)):
                 xhs_user_id=uid,
                 account_id=req.account_id,
                 interval_minutes=req.interval_minutes or 60,
+                monitor_start=m_start,
+                monitor_end=m_end,
                 status="active",
                 # 监控起点 = 导入这一刻，之后的笔记才算新笔记
                 monitor_since=int(datetime.now().timestamp() * 1000),
@@ -792,10 +674,21 @@ def batch_update_bloggers(req: BatchUpdateRequest, _=Depends(require_auth)):
     try:
         if not req.ids:
             raise HTTPException(status_code=400, detail="未选择博主")
+        values = {"interval_minutes": req.interval_minutes}
+        if req.clear_window:
+            values["monitor_start"] = ""
+            values["monitor_end"] = ""
+        elif req.monitor_start is not None or req.monitor_end is not None:
+            m_start = _norm_hhmm(req.monitor_start)
+            m_end = _norm_hhmm(req.monitor_end)
+            _check_window(m_start, m_end)
+            values["monitor_start"] = m_start
+            values["monitor_end"] = m_end
+        # account_id 显式传 null 时才清空账号
+        if "account_id" in req.model_fields_set:
+            values["account_id"] = req.account_id
         result = db.execute(
-            sa_update(Blogger)
-            .where(Blogger.id.in_(req.ids))
-            .values(account_id=req.account_id, interval_minutes=req.interval_minutes)
+            sa_update(Blogger).where(Blogger.id.in_(req.ids)).values(**values)
         )
         db.commit()
         return {"ok": True, "updated": result.rowcount}
