@@ -86,6 +86,12 @@ app = FastAPI(title="小红书博主监控后台", lifespan=lifespan)
 os.makedirs(covers.COVERS_DIR, exist_ok=True)
 app.mount("/covers", StaticFiles(directory=covers.COVERS_DIR), name="covers")
 
+# 前端依赖本地化（vendor/ 放 vue / element-plus 等），避免依赖公网 CDN。
+# 挂载在 /vendor 下，与 index.html 里的引用路径一致。
+_VENDOR_DIR = os.path.join(STATIC_DIR, "vendor")
+os.makedirs(_VENDOR_DIR, exist_ok=True)
+app.mount("/vendor", StaticFiles(directory=_VENDOR_DIR), name="vendor")
+
 
 def require_auth(authorization: str = Header(default="")):
     token = authorization.replace("Bearer", "").strip()

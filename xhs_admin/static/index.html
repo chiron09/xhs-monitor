@@ -6,7 +6,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>小红书博主监控后台</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23ff2442'/%3E%3Ctext x='16' y='22' font-size='17' font-family='sans-serif' font-weight='bold' fill='%23fff' text-anchor='middle'%3E红%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/element-plus@2.9.1/dist/index.css">
+<link rel="stylesheet" href="/vendor/element-plus.css">
 <style>
 [v-cloak]{display:none}
 html,body,#app{height:100%;margin:0}
@@ -125,8 +125,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
 .side-mask{display:none}
 
 /* 浏览器登录 tab：把弹窗撑开，内嵌画面才够大、二维码才扫得清
-   （必须放在下面所有 @media 之外，否则窄屏规则把它盖掉） */
-.el-dialog.wide-login .el-dialog__body{padding:12px 16px}
+   （必须放在下面所有 @media 之外，否则窄屏规则把它盖掉）
+   弹窗宽度：只在该 tab 下生效，覆盖 el-dialog 上的 width="560px" 内联宽度。
+   用 !important 压过 Element Plus 写在 style 上的宽度。 */
+.el-dialog.wide-login{width:92vw !important;max-width:92vw !important;margin-top:2vh !important}
+.el-dialog.wide-login .el-dialog__body{padding:12px 16px;max-height:88vh;overflow:auto}
+/* 浏览器登录画面容器：撑满弹窗宽度，并给足高度 */
+.login-frame-wrap{width:100%;max-width:100%;margin:10px auto;background:#fff;border:1px solid #dcdfe6;border-radius:8px;overflow:auto;-webkit-overflow-scrolling:touch}
+/* 画面高度自适应：视口越高画面越高，最少 420px，最多 78vh */
+.login-frame-view{display:flex;align-items:flex-start;justify-content:center;min-height:clamp(420px,62vh,78vh)}
+.login-frame-hint{max-width:100%;margin:0 auto;padding:8px 12px;font-size:12px;color:#8a919f;text-align:center;line-height:1.7}
 
 /* ================= 响应式：窄屏 / 手机适配 ================= */
 
@@ -175,6 +183,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
   /* ---- 弹窗：满宽、内容可滚动、底部按钮不贴边 ---- */
   .el-dialog{width:94vw !important;max-width:94vw !important;margin-top:5vh !important;border-radius:12px}
   .el-dialog.wide-login{margin-top:2vh !important}
+  /* 手机端登录画面：不强制最小高度，跟随图片自身比例 */
+  .login-frame-view{min-height:0}
   .el-dialog__header{padding:14px 16px 10px}
   .el-dialog__body{padding:12px 14px;max-height:74vh;overflow:auto;-webkit-overflow-scrolling:touch}
   .el-dialog__footer{padding:10px 14px 14px}
@@ -525,8 +535,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
               <el-button size="small" type="success" :loading="qrCloseLoading" @click="openQrCloseup">二维码特写</el-button>
             </div>
           </div>
-          <div v-show="browserRunning" style="width:100%;max-width:1180px;margin:8px auto;background:#fff;border:1px solid #dcdfe6;border-radius:8px;overflow:auto;-webkit-overflow-scrolling:touch">
-            <div :style="frameBoxStyle">
+          <div v-show="browserRunning" class="login-frame-wrap">
+            <div class="login-frame-view" :style="frameBoxStyle">
             <img id="loginFrame" :src="frameDataUrl" tabindex="0" @load="frameLoaded"
                  :style="frameImgStyle"
                  style="display:block;user-select:none;-webkit-user-drag:none;outline:none;cursor:text"
@@ -539,7 +549,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
                  @contextmenu.prevent>
             </div>
           </div>
-          <div v-show="browserRunning" style="max-width:1180px;margin:0 auto;padding:6px 12px;font-size:12px;color:#8a919f;text-align:center">
+          <div v-show="browserRunning" class="login-frame-hint">
             上方为服务端登录页实时画面（高清图）— 直接点击操作（点输入框可打字，可滚动）；画面看不清就调「画面大小」或点「二维码特写」用手机扫；登录完成后点上方「完成登录」按钮
           </div>
         </div>
@@ -670,10 +680,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
   </el-dialog>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/vue@3.5.13/dist/vue.global.prod.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/element-plus@2.9.1/dist/index.full.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@element-plus/icons-vue@2.3.1/dist/index.iife.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/element-plus@2.9.1/dist/locale/zh-cn.min.js"></script>
+<script src="/vendor/vue.global.prod.js"></script>
+<script src="/vendor/element-plus.full.min.js"></script>
+<script src="/vendor/icons-vue.iife.min.js"></script>
+<script src="/vendor/zh-cn.min.js"></script>
 <script>
 const { ElMessage, ElMessageBox } = ElementPlus;
 const TOKEN_KEY = 'xhs_admin_token';
@@ -761,7 +771,7 @@ const app = Vue.createApp({
     // 放大只做 transform 缩放（GPU 合成），绝不改 img 的实际像素尺寸 ——
     // 否则每帧要把 2400x1500 的大图重新解码绘制到 3000px 宽，页面会卡死十几秒
     frameImgStyle() {
-      if (this.frameZoom === 'fit') return { width: '100%', transform: 'none' };
+      if (this.frameZoom === 'fit') return { width: '100%', height: 'auto', transform: 'none' };
       const s = parseFloat(this.frameZoom);
       return { width: this.frameWidth + 'px', height: this.frameHeight + 'px',
                transform: 'scale(' + s + ')',
