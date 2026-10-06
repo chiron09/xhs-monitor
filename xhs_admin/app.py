@@ -20,7 +20,7 @@ import covers
 import notifier
 import scheduler
 import xhs_client
-from config import DEFAULT_PASSWORD, STATIC_DIR, TOKEN_TTL, hash_password
+from config import DEFAULT_PASSWORD, MIN_INTERVAL_MINUTES, STATIC_DIR, TOKEN_TTL, hash_password
 from db import Account, AuthToken, Blogger, Note, SessionLocal, Setting
 
 # ---- 登录 token（持久化到 auth_tokens 表，重启后台不掉登录） ----
@@ -137,7 +137,7 @@ class BloggerCreate(BaseModel):
     name: str = ""
     url: str = Field(min_length=1)
     account_id: int | None = None
-    interval_minutes: int = Field(default=60, ge=1, le=10080)
+    interval_minutes: int = Field(default=60, ge=MIN_INTERVAL_MINUTES, le=10080)
     monitor_start: str = ""
     monitor_end: str = ""
 
@@ -146,7 +146,7 @@ class BloggerUpdate(BaseModel):
     name: str | None = None
     url: str | None = None
     account_id: int | None = None
-    interval_minutes: int | None = Field(default=None, ge=1, le=10080)
+    interval_minutes: int | None = Field(default=None, ge=MIN_INTERVAL_MINUTES, le=10080)
     monitor_start: str | None = None
     monitor_end: str | None = None
     status: str | None = None
@@ -167,7 +167,7 @@ class FollowingsListRequest(BaseModel):
 class ImportFollowingsRequest(BaseModel):
     account_id: int
     items: list[dict]
-    interval_minutes: int = 60
+    interval_minutes: int = Field(default=60, ge=MIN_INTERVAL_MINUTES, le=10080)
     monitor_start: str = ""
     monitor_end: str = ""
 
@@ -175,7 +175,7 @@ class ImportFollowingsRequest(BaseModel):
 class BatchUpdateRequest(BaseModel):
     ids: list[int]
     account_id: int | None = None
-    interval_minutes: int = Field(default=60, ge=1, le=10080)
+    interval_minutes: int = Field(default=60, ge=MIN_INTERVAL_MINUTES, le=10080)
     # 只更新显式传入的字段：批量弹窗里没填的项保持原值不动
     monitor_start: str | None = None
     monitor_end: str | None = None

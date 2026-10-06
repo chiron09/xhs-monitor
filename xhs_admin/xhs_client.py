@@ -69,7 +69,15 @@ def fetch_notes_page(cookie: str, url: str):
         xsec_source = q.get("xsec_source", ["pc_search"])[0]
         success, msg, data = api.get_user_note_info(uid, "", xsec_token, xsec_source)
         if not success:
-            return False, [], "", str(msg)
+            err = str(msg or "")
+            # SDK 在响应缺 'success' 字段时（风控/账号异常，如 code 300011）会抛 KeyError，
+            # msg 变成无用的 "'success'"；真实错误藏在 data 里（{'code': 300011, 'msg': '账号异常...'}）。
+            if isinstance(data, dict) and (data.get("msg") or data.get("code")):
+                parts = [str(data.get("msg") or "").strip()]
+                if data.get("code"):
+                    parts.append(f"code {data['code']}")
+                err = "，".join(p for p in parts if p)
+            return False, [], "", err
         notes = []
         if isinstance(data, dict):
             notes = (data.get("data") or {}).get("notes") or []

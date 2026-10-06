@@ -570,8 +570,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
         </el-select>
       </el-form-item>
       <el-form-item label="轮巡间隔">
-        <el-input-number v-model="bloggerForm.interval_minutes" :min="1" :max="10080"></el-input-number>
+        <el-input-number v-model="bloggerForm.interval_minutes" :min="10" :max="10080"></el-input-number>
         <span style="margin-left:10px;font-size:12px;color:#8a919f">分钟</span>
+        <div style="width:100%;font-size:12px;color:#a3a9b5;line-height:1.5;margin-top:4px">最短 10 分钟；调度器每轮限量并发抓取，间隔过短也会被排队；账号触发风控会自动暂停 30 分钟</div>
       </el-form-item>
       <el-form-item label="监控时段">
         <div class="time-range">
@@ -607,7 +608,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
       <el-button type="danger" :loading="followLoading" @click="fetchFollowings">获取关注列表</el-button>
       <div style="display:flex;align-items:center;gap:8px">
         <span style="font-size:13px;color:#606266">轮巡间隔</span>
-        <el-input-number v-model="followImportInterval" :min="1" :max="10080"></el-input-number>
+        <el-input-number v-model="followImportInterval" :min="10" :max="10080"></el-input-number>
         <span style="font-size:13px;color:#8a919f">分钟</span>
       </div>
       <div style="display:flex;align-items:center;gap:8px">
@@ -645,7 +646,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
         </el-select>
       </el-form-item>
       <el-form-item label="轮巡间隔">
-        <el-input-number v-model="batchForm.interval_minutes" :min="1" :max="10080"></el-input-number>
+        <el-input-number v-model="batchForm.interval_minutes" :min="10" :max="10080"></el-input-number>
         <span style="margin-left:10px;font-size:12px;color:#8a919f">分钟</span>
       </el-form-item>
       <el-form-item label="监控时段">

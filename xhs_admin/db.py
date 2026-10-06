@@ -22,6 +22,17 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _fmt_ms(ms) -> str:
+    """epoch 毫秒 → 'YYYY-MM-DD HH:MM:SS'；0/非法 → 空字符串（供前端直接展示）。"""
+    try:
+        v = int(ms or 0)
+    except (TypeError, ValueError):
+        return ""
+    if v <= 0:
+        return ""
+    return datetime.fromtimestamp(v / 1000).strftime("%Y-%m-%d %H:%M:%S")
+
+
 class Account(Base):
     """小红书账号（Cookie 导入）。"""
     __tablename__ = "accounts"
@@ -69,7 +80,11 @@ class Blogger(Base):
     # 监控起点（毫秒时间戳）：添加博主那一刻。
     # 只把此刻之后发布的笔记视为「新笔记」，避免把添加前的历史笔记推出去。
     monitor_since = Column(BigInteger, default=0)
-    last_crawled_at = Column(String(32), default="")
+    # 上次「成功抓取」时间（epoch 毫秒，0=从未）；上次「尝试」时间与连续失败次数
+    # 用于失败退避（见 scheduler._is_due），二者分开：失败不推进 last_crawled_at。
+    last_crawled_at = Column(BigInteger, default=0)
+    last_attempt_at = Column(BigInteger, default=0)
+    fail_count = Column(Integer, default=0)
     last_error = Column(Text, default="")
     created_at = Column(String(32), default=_now)
 
@@ -91,7 +106,7 @@ class Blogger(Base):
             "status": self.status,
             "baseline_count": len(baseline),
             "monitor_since": self.monitor_since or 0,
-            "last_crawled_at": self.last_crawled_at,
+            "last_crawled_at": _fmt_ms(self.last_crawled_at),
             "last_error": self.last_error,
             "created_at": self.created_at,
         }
@@ -109,6 +124,9 @@ class Note(Base):
     note_url = Column(Text, default="")
     publish_time = Column(BigInteger, default=0)  # 毫秒时间戳
     liked_count = Column(Integer, default=0)
+    # 推送状态："" / "pending" / "sent" / "failed"（推送补偿重试用）
+    push_status = Column(String(16), default="")
+    push_attempts = Column(Integer, default=0)
     created_at = Column(String(32), default=_now)
 
     def to_dict(self) -> dict:
@@ -121,6 +139,8 @@ class Note(Base):
             "note_url": self.note_url,
             "publish_time": self.publish_time,
             "liked_count": self.liked_count,
+            "push_status": self.push_status,
+            "push_attempts": self.push_attempts,
             "created_at": self.created_at,
         }
 
@@ -160,6 +180,12 @@ def _ensure_columns() -> None:
             ("monitor_since", "BIGINT DEFAULT 0"),
             ("monitor_start", "VARCHAR(8) DEFAULT ''"),
             ("monitor_end", "VARCHAR(8) DEFAULT ''"),
+            ("last_attempt_at", "BIGINT DEFAULT 0"),
+            ("fail_count", "INTEGER DEFAULT 0"),
+        ],
+        "notes": [
+            ("push_status", "VARCHAR(16) DEFAULT ''"),
+            ("push_attempts", "INTEGER DEFAULT 0"),
         ],
     }
     try:
@@ -170,6 +196,33 @@ def _ensure_columns() -> None:
                 for name, ddl in cols:
                     if name not in existing:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+            # 数据迁移：last_crawled_at 由 'YYYY-MM-DD HH:MM:SS' 字符串改为 epoch 毫秒。
+            # 幂等：已是整数、或纯数字字符串（上轮已迁移，旧 VARCHAR 亲和列会把 int 存成
+            # 数字文本）都跳过；只对日期串做 strptime 转换，避免二次重启把值误清零。
+            for bid, val in conn.execute("SELECT id, last_crawled_at FROM bloggers").fetchall():
+                if val is None:
+                    continue
+                if isinstance(val, int):
+                    continue
+                if isinstance(val, str) and val.strip().isdigit():
+                    continue
+                epoch = 0
+                try:
+                    epoch = int(datetime.strptime(val or "", "%Y-%m-%d %H:%M:%S").timestamp() * 1000)
+                except Exception:  # noqa: BLE001
+                    epoch = 0
+                conn.execute("UPDATE bloggers SET last_crawled_at=? WHERE id=?", (epoch, bid))
+
+            # notes 去重 + 唯一索引（防并发/重复入库）
+            conn.execute(
+                "DELETE FROM notes WHERE id NOT IN "
+                "(SELECT MIN(id) FROM notes GROUP BY blogger_id, note_id)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_notes_blogger_note "
+                "ON notes(blogger_id, note_id)"
+            )
             conn.commit()
         finally:
             conn.close()
