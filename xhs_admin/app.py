@@ -20,7 +20,7 @@ import covers
 import notifier
 import scheduler
 import xhs_client
-from config import DEFAULT_PASSWORD, MIN_INTERVAL_MINUTES, RATE_LIMIT_KEYWORDS, STATIC_DIR, TOKEN_TTL, hash_password
+from config import DEFAULT_PASSWORD, MIN_INTERVAL_MINUTES, RATE_LIMIT_KEYWORDS, STATIC_DIR, TOKEN_TTL, get_tunables, hash_password, save_tunables
 from db import Account, AuthToken, Blogger, Note, SessionLocal, Setting
 
 # ---- 登录 token（持久化到 auth_tokens 表，重启后台不掉登录） ----
@@ -293,6 +293,26 @@ def change_password(req: PasswordRequest, _=Depends(require_auth)):
     finally:
         db.close()
     return {"ok": True}
+
+
+# ---------- 监控参数（后台可调） ----------
+@app.get("/api/settings/tunables")
+def get_tunables_api(_=Depends(require_auth)):
+    db = SessionLocal()
+    try:
+        return get_tunables(db)
+    finally:
+        db.close()
+
+
+@app.post("/api/settings/tunables")
+def save_tunables_api(req: dict, _=Depends(require_auth)):
+    db = SessionLocal()
+    try:
+        cfg = save_tunables(db, req or {})
+        return {"ok": True, "config": cfg}
+    finally:
+        db.close()
 
 
 # ---------- 账号管理 ----------

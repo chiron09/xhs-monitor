@@ -453,6 +453,32 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
               </el-form>
             </div>
 
+            <div class="card narrow-card">
+              <div class="card-head">监控参数</div>
+              <div class="card-desc">抓取与推送的可调参数，保存后立即生效（无需重启后台）</div>
+              <el-form label-width="110px">
+                <el-form-item label="增量抓取条数">
+                  <el-input-number v-model="tunables.crawl_num" :min="1" :max="30"></el-input-number>
+                  <span style="margin-left:10px;font-size:12px;color:#8a919f">每次轮询只拉最新 N 条</span>
+                </el-form-item>
+                <el-form-item label="首抓条数">
+                  <el-input-number v-model="tunables.first_crawl_num" :min="1" :max="30"></el-input-number>
+                  <span style="margin-left:10px;font-size:12px;color:#8a919f">添加博主时建基线取 N 条</span>
+                </el-form-item>
+                <el-form-item label="并发数">
+                  <el-input-number v-model="tunables.max_per_round" :min="1" :max="20"></el-input-number>
+                  <span style="margin-left:10px;font-size:12px;color:#8a919f">每轮最多同时抓 N 个博主</span>
+                </el-form-item>
+                <el-form-item label="推送时效">
+                  <el-input-number v-model="tunables.push_max_age_minutes" :min="0" :max="1440"></el-input-number>
+                  <span style="margin-left:10px;font-size:12px;color:#8a919f">分钟，0=不限；发布时间超过则不推送</span>
+                </el-form-item>
+                <el-form-item>
+                  <el-button type="primary" :loading="savingTunables" @click="saveTunables">保存参数</el-button>
+                </el-form-item>
+              </el-form>
+            </div>
+
             <div class="card">
               <div class="card-head">新笔记推送</div>
               <div class="card-desc">博主发布新笔记时，自动推送「笔记标题 + 链接」到下方启用的渠道</div>
@@ -751,6 +777,9 @@ const app = Vue.createApp({
           feishu: { enabled:false, webhook:'' },
         }
       },
+      // 监控可调参数（后台设置页，落库 Setting 表，改后立即生效）
+      tunables: { crawl_num: 5, first_crawl_num: 1, max_per_round: 4, push_max_age_minutes: 30 },
+      savingTunables: false,
     };
   },
   computed: {
@@ -818,7 +847,7 @@ const app = Vue.createApp({
       this.activeTab = name;
       if (this.isMobile) this.sidebarOpen = false;  // 手机端点完自动收起抽屉
       if (name==='notes') this.loadNotes();
-      if (name==='settings') this.loadNotifyConfig();
+      if (name==='settings') { this.loadNotifyConfig(); this.loadTunables(); }
     },
 
     /* 账号 */
@@ -1224,6 +1253,21 @@ const app = Vue.createApp({
       else if (d.ok_count > 0) ElMessage.warning('部分成功：成功 ' + d.ok_count + '，失败 ' + d.failures.length + '（' + d.failures.join('；') + '）');
       else if (d.failures && d.failures.length) ElMessage.error('推送失败：' + d.failures.join('；'));
       else ElMessage.warning('请先启用至少一个渠道');
+    },
+    async loadTunables() {
+      try { const d = await this.api('/api/settings/tunables'); this.tunables = d; } catch(e) {}
+    },
+    async saveTunables() {
+      this.savingTunables = true;
+      try {
+        const d = await this.api('/api/settings/tunables', 'POST', this.tunables);
+        this.tunables = d.config || this.tunables;
+        ElMessage.success('监控参数已保存，立即生效');
+      } catch(e) {
+        ElMessage.error('保存失败：' + (e && e.message ? e.message : '未知错误'));
+      } finally {
+        this.savingTunables = false;
+      }
     },
 
     /* 工具 */

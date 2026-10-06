@@ -11,7 +11,7 @@ from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import notifier
-from config import CRAWL_NUM, DATA_DIR, MAX_PER_ROUND, MIN_INTERVAL_MINUTES, PUSH_MAX_AGE_MS, RATE_LIMIT_KEYWORDS
+from config import DATA_DIR, MAX_PER_ROUND, MIN_INTERVAL_MINUTES, PUSH_MAX_AGE_MS, RATE_LIMIT_KEYWORDS, get_tunables
 from db import Account, Blogger, Note, SessionLocal, Setting
 from xhs_client import fetch_notes_page, is_pinned, normalize_note
 
@@ -191,7 +191,8 @@ def _is_recent(publish_time: int, now_ms: int | None = None,
     """publish_time 是否在「最近 max_age_ms」内（距当前不超过时效窗口）。
 
     用于过滤「监控停摆期间漏抓的旧笔记」：发布时间距现在太久就不推送。
-    缺失/非法/非正值 → 保守判 False。now_ms 用于单测注入固定时间。
+    缺失/非法/非正值 → 保守判 False；max_age_ms <= 0 视为「不限制时效」。
+    now_ms 用于单测注入固定时间。
     """
     try:
         pt = int(publish_time or 0)
@@ -201,18 +202,22 @@ def _is_recent(publish_time: int, now_ms: int | None = None,
         return False
     now = now_ms if now_ms is not None else _now_ms()
     age = max_age_ms if max_age_ms is not None else PUSH_MAX_AGE_MS
+    if age <= 0:  # 0/负值 = 不限制时效（仅保留「今天 + 晚于监控起点」两层过滤）
+        return True
     return 0 <= now - pt <= age
 
 
-def _passes_new_filter(note: dict, monitor_since: int) -> bool:
-    """三重过滤：必须「今天发布」且「晚于监控起点」且「最近 30 分钟内」。
+def _passes_new_filter(note: dict, monitor_since: int,
+                       max_age_ms: int | None = None) -> bool:
+    """三重过滤：必须「今天发布」且「晚于监控起点」且「最近 N 分钟内」。
 
     发布时间缺失/非法 → 都不满足 → 不推（保守，避免误报旧笔记）。
+    max_age_ms 由调用方从 tunables 传入；None 用默认（30 分钟），<=0 不限时效。
     """
     pt = note.get("publish_time", 0)
     return (_is_published_today(pt)
             and _is_after_monitor_since(pt, monitor_since)
-            and _is_recent(pt))
+            and _is_recent(pt, max_age_ms=max_age_ms))
 
 
 def _parse_hhmm(value: str):
@@ -370,9 +375,13 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False,
     # 记录本次尝试时间（失败退避用）；成功时间单独记 last_crawled_at
     blogger.last_attempt_at = _now_ms()
 
+    # 可调参数：增量抓取条数 / 首抓条数 / 推送时效 从后台设置读取（环境变量兜底）
+    tun = get_tunables(db)
+    num = tun["first_crawl_num"] if establish_baseline else tun["crawl_num"]
+
     ok, notes, nickname, error = fetch_notes_page(
         account.cookie, blogger.url,
-        num=1 if establish_baseline else CRAWL_NUM,
+        num=num,
     )
 
     if not ok:
@@ -417,9 +426,10 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False,
         known = set(baseline)
         candidates = [n for n in normalized if n["note_id"] not in known]
 
-    # 双重过滤：只保留「今天发布」且「晚于监控起点」的笔记
+    # 三重过滤：只保留「今天发布」且「晚于监控起点」且「时效窗口内」的笔记
     monitor_since = blogger.monitor_since or 0
-    new_notes = [n for n in candidates if _passes_new_filter(n, monitor_since)]
+    max_age_ms = tun["push_max_age_minutes"] * 60000  # 0 = 不限制时效
+    new_notes = [n for n in candidates if _passes_new_filter(n, monitor_since, max_age_ms)]
     skipped = len(candidates) - len(new_notes)
 
     # 去重：已入库的 note 不再重复插入（DB 唯一索引兜底并发）
@@ -503,9 +513,11 @@ def check_and_crawl() -> dict:
     _setup_logging()
     db = SessionLocal()
     due_ids = []
+    max_per_round = MAX_PER_ROUND  # 默认值，防 get_tunables 异常
     skipped_window = 0
     skipped_cooldown = 0
     try:
+        max_per_round = get_tunables(db)["max_per_round"]
         bloggers = (db.query(Blogger)
                     .filter(Blogger.status == "active")
                     .order_by(Blogger.id.asc())
@@ -524,7 +536,7 @@ def check_and_crawl() -> dict:
             in_window.append(b)
         due = [b for b in in_window if _is_due(b, now_ms)]
         due.sort(key=lambda b: b.last_attempt_at or 0)  # 最久未抓取优先
-        due_ids = [b.id for b in due[:MAX_PER_ROUND]]
+        due_ids = [b.id for b in due[:max_per_round]]
     finally:
         db.close()
 
@@ -538,7 +550,7 @@ def check_and_crawl() -> dict:
             d.close()
 
     if due_ids:
-        with ThreadPoolExecutor(max_workers=MAX_PER_ROUND) as ex:
+        with ThreadPoolExecutor(max_workers=max_per_round) as ex:
             futures = [ex.submit(_run, bid) for bid in due_ids]
             for fut in as_completed(futures):
                 try:

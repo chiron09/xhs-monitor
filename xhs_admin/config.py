@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """全局配置。"""
+import json
 import os
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -37,14 +38,90 @@ SALT = os.environ.get("XHS_ADMIN_SALT") or "xhs-admin-local-2026"
 # scheduler 的自适应退避、账号检测接口都引用同一份。
 RATE_LIMIT_KEYWORDS = ("账号异常", "稍后重试", "300011", "风控", "操作频繁")
 
-# 每次抓取拉取的最新笔记条数（增量抓取：首抓与后续轮询都用这个值，
-# 只取最新 N 条，不再每次拉 30 条重复处理旧笔记）。可用 XHS_ADMIN_CRAWL_NUM 覆盖。
+# 每次抓取拉取的最新笔记条数（增量抓取：只取最新 N 条，不再每次拉 30 条重复处理旧笔记）。
+# 可用 XHS_ADMIN_CRAWL_NUM 覆盖，也可在后台「系统设置」里改。
 CRAWL_NUM = int(os.environ.get("XHS_ADMIN_CRAWL_NUM") or 5)
+
+# 首次抓取（添加博主那一刻建基线）拉取的条数。默认 1：只取最新 1 条非置顶笔记。
+FIRST_CRAWL_NUM = int(os.environ.get("XHS_ADMIN_FIRST_CRAWL_NUM") or 1)
 
 # 推送时效窗口（毫秒）：新笔记的发布时间距「当前抓取时刻」超过该时长就不推送。
 # 用于避免把「监控停摆期间漏抓的旧笔记」当成新笔记补推。默认 30 分钟，可用
-# XHS_ADMIN_PUSH_MAX_AGE_MS 覆盖（单位毫秒）。
+# XHS_ADMIN_PUSH_MAX_AGE_MS 覆盖（单位毫秒），也可在后台「系统设置」里改。
 PUSH_MAX_AGE_MS = int(os.environ.get("XHS_ADMIN_PUSH_MAX_AGE_MS") or 30 * 60 * 1000)
+
+
+# ---------- 运行时可调参数（后台「系统设置」可改，存 Setting 表，环境变量为兜底默认） ----------
+
+TUNABLES_KEY = "tunables"
+
+# 可调参数的合法范围（save_tunables 用；get_tunables 兜底越界值）
+_TUNABLES_RANGE = {
+    "crawl_num": (1, 30),
+    "first_crawl_num": (1, 30),
+    "max_per_round": (1, 20),
+    "push_max_age_minutes": (0, 24 * 60),  # 0 表示不限制时效
+}
+
+
+def _default_tunables() -> dict:
+    return {
+        "crawl_num": CRAWL_NUM,
+        "first_crawl_num": FIRST_CRAWL_NUM,
+        "max_per_round": MAX_PER_ROUND,
+        "push_max_age_minutes": PUSH_MAX_AGE_MS // 60000,
+    }
+
+
+def get_tunables(db) -> dict:
+    """读取可调参数。Setting 表里的值覆盖环境变量默认值；越界/非法回退默认。"""
+    from db import Setting
+    cfg = _default_tunables()
+    try:
+        s = db.get(Setting, TUNABLES_KEY)
+        if s and s.value:
+            data = json.loads(s.value)
+            if isinstance(data, dict):
+                for k, (lo, hi) in _TUNABLES_RANGE.items():
+                    v = data.get(k)
+                    if isinstance(v, int) and lo <= v <= hi:
+                        cfg[k] = v
+    except Exception:  # noqa: BLE001
+        pass
+    return cfg
+
+
+def save_tunables(db, data: dict) -> dict:
+    """保存可调参数（只接受合法字段与范围），返回归一化后的完整配置。"""
+    from db import Setting
+    cfg = _default_tunables()
+    try:
+        s = db.get(Setting, TUNABLES_KEY)
+        if s and s.value:
+            loaded = json.loads(s.value)
+            if isinstance(loaded, dict):
+                for k, (lo, hi) in _TUNABLES_RANGE.items():
+                    v = loaded.get(k)
+                    if isinstance(v, int) and lo <= v <= hi:
+                        cfg[k] = v
+    except Exception:  # noqa: BLE001
+        pass
+    for k, (lo, hi) in _TUNABLES_RANGE.items():
+        if k in data and data[k] is not None:
+            try:
+                v = int(data[k])
+            except (TypeError, ValueError):
+                continue
+            if lo <= v <= hi:
+                cfg[k] = v
+    s = db.get(Setting, TUNABLES_KEY)
+    value = json.dumps(cfg, ensure_ascii=False)
+    if s:
+        s.value = value
+    else:
+        db.add(Setting(key=TUNABLES_KEY, value=value))
+    db.commit()
+    return cfg
 
 
 def hash_password(pwd: str) -> str:
