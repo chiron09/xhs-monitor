@@ -25,8 +25,9 @@ SCHEDULER_INTERVAL = int(os.environ.get("XHS_ADMIN_SCHEDULER_INTERVAL") or 20)
 MIN_INTERVAL_MINUTES = int(os.environ.get("XHS_ADMIN_MIN_INTERVAL") or 10)
 
 # 每轮最多抓取的博主数（错峰限流）。可用 XHS_ADMIN_MAX_PER_ROUND 覆盖。
-# 实测（单账号 37 博主）：并发 4 全成、延迟 4.5s；并发 8 触发风控(300011)。
-# 故默认取 4 稳值；6 临界、8 易锁号。调度器另有「风控自适应退避」兜底。
+# 实测（单账号 37 博主，充分冷却后复测）：并发 1~20 全成，无风控；但并发↑单请求延迟线性上升
+# （4→3.2s、8→6.2s、16→10.8s），吞吐在 16 见顶后 20 反降。延迟最优=4，吞吐峰值=16。
+# 默认取 4（延迟/安全平衡点）；要更高吞吐可提 6~8。调度器另有「风控自适应退避」兜底。
 MAX_PER_ROUND = int(os.environ.get("XHS_ADMIN_MAX_PER_ROUND") or 4)
 
 # 密码加盐（本机后台，固定盐即可；可用环境变量覆盖）
@@ -39,6 +40,11 @@ RATE_LIMIT_KEYWORDS = ("账号异常", "稍后重试", "300011", "风控", "操�
 # 每次抓取拉取的最新笔记条数（增量抓取：首抓与后续轮询都用这个值，
 # 只取最新 N 条，不再每次拉 30 条重复处理旧笔记）。可用 XHS_ADMIN_CRAWL_NUM 覆盖。
 CRAWL_NUM = int(os.environ.get("XHS_ADMIN_CRAWL_NUM") or 5)
+
+# 推送时效窗口（毫秒）：新笔记的发布时间距「当前抓取时刻」超过该时长就不推送。
+# 用于避免把「监控停摆期间漏抓的旧笔记」当成新笔记补推。默认 30 分钟，可用
+# XHS_ADMIN_PUSH_MAX_AGE_MS 覆盖（单位毫秒）。
+PUSH_MAX_AGE_MS = int(os.environ.get("XHS_ADMIN_PUSH_MAX_AGE_MS") or 30 * 60 * 1000)
 
 
 def hash_password(pwd: str) -> str:
