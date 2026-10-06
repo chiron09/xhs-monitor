@@ -134,7 +134,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
 /* 浏览器登录画面容器：撑满弹窗宽度；限高（弹窗 body 88vh 减去按钮/提示区约 300px），
    画面超出在容器内滚动，避免弹窗 body 出现第二根滚动条 */
 .login-frame-wrap{width:100%;max-width:100%;max-height:max(320px,calc(88vh - 300px));margin:10px auto;background:#fff;border:1px solid #dcdfe6;border-radius:8px;overflow:auto;-webkit-overflow-scrolling:touch}
-/* 画面内容块：尺寸由 frameBoxStyle 控制（fit=自适应 / 放大=显式宽高） */
+/* 画面内容块：始终适应宽度显示，img 撑满容器宽、高度自适应 */
 .login-frame-view{display:block}
 .login-frame-hint{max-width:100%;margin:0 auto;padding:8px 12px;font-size:12px;color:#8a919f;text-align:center;line-height:1.7}
 
@@ -236,9 +236,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
 
   /* ---- 浏览器登录画面 ---- */
   #loginFrame{cursor:default}
-  /* 画面大小单选组在窄屏可换行，避免超出 */
-  .frame-zoom{flex-wrap:wrap;justify-content:center}
-  .frame-zoom .el-radio-group{flex-wrap:wrap;justify-content:center}
 }
 
 /* 超小屏（手机竖屏窄机）微调 */
@@ -525,34 +522,24 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
             <el-button v-if="browserRunning" type="success" size="large" :loading="browserChecking" @click="checkBrowserLogin">完成登录，读取登录态</el-button>
             <el-button v-if="browserRunning" size="small" @click="stopBrowserLogin">关闭</el-button>
             <div :style="{marginTop:'10px',fontSize:'13px',color:browserStatusColor}">{{ browserStatusText || '点击按钮，登录页将显示在下方画面中' }}</div>
-            <div v-show="browserRunning" class="frame-zoom" style="margin:8px auto 0;display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap">
-              <span style="font-size:12px;color:#8a919f">画面大小</span>
-              <el-radio-group v-model="frameZoom" size="small" @change="restartFrameStream">
-                <el-radio-button value="fit">适应宽度</el-radio-button>
-                <el-radio-button value="1">原始 100%</el-radio-button>
-                <el-radio-button value="1.25">125%</el-radio-button>
-                <el-radio-button value="1.6">160%</el-radio-button>
-                <el-radio-button value="2">200%</el-radio-button>
-              </el-radio-group>
+            <div v-show="browserRunning" style="margin:8px auto 0;display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap">
               <el-button size="small" type="success" :loading="qrCloseLoading" @click="openQrCloseup">二维码特写</el-button>
             </div>
           </div>
           <div v-show="browserRunning" class="login-frame-wrap">
-            <div class="login-frame-view" :style="frameBoxStyle">
+            <div class="login-frame-view">
             <img id="loginFrame" :src="frameDataUrl" tabindex="0"
-                 :style="frameImgStyle"
-                 style="display:block;user-select:none;-webkit-user-drag:none;outline:none;cursor:text"
+                 style="display:block;width:100%;height:auto;user-select:none;-webkit-user-drag:none;outline:none;cursor:text"
                  @mousedown.prevent="frameMouse($event,'pressed')"
                  @mouseup.prevent="frameMouse($event,'released')"
                  @mousemove="frameMouse($event,'moved')"
-                 @wheel="frameWheel($event)"
                  @keydown="frameKey($event, true)"
                  @keyup="frameKey($event, false)"
                  @contextmenu.prevent>
             </div>
           </div>
           <div v-show="browserRunning" class="login-frame-hint">
-            上方为服务端登录页实时画面（高清图）— 直接点击操作（点输入框可打字，可滚动）；画面看不清就调「画面大小」或点「二维码特写」用手机扫；登录完成后点上方「完成登录」按钮
+            上方为服务端登录页实时画面（高清图）— 直接点击操作（点输入框可打字）；画面看不清就点「二维码特写」用手机扫；登录完成后点上方「完成登录」按钮
           </div>
         </div>
       </el-tab-pane>
@@ -717,7 +704,6 @@ const app = Vue.createApp({
       frameHeight: 0,
       frameTimer: null,
       frameBusy: false,
-      frameZoom: 'fit',
       qrCloseupVisible: false,
       qrCloseImage: '',
       qrCloseLoading: false,
@@ -769,21 +755,6 @@ const app = Vue.createApp({
   computed: {
     pageTitle() {
       return { accounts:'账号管理', bloggers:'博主监控', notes:'笔记记录', settings:'系统设置' }[this.activeTab] || '';
-    },
-    // 放大只做 transform 缩放（GPU 合成），绝不改 img 的实际像素尺寸 ——
-    // 否则每帧要把 2400x1500 的大图重新解码绘制到 3000px 宽，页面会卡死十几秒
-    frameImgStyle() {
-      if (this.frameZoom === 'fit') return { width: '100%', height: 'auto', transform: 'none' };
-      const s = parseFloat(this.frameZoom);
-      return { width: this.frameWidth + 'px', height: this.frameHeight + 'px',
-               transform: 'scale(' + s + ')',
-               transformOrigin: 'top left' };
-    },
-    frameBoxStyle() {
-      if (this.frameZoom === 'fit') return {};
-      const s = parseFloat(this.frameZoom);
-      return { width: (this.frameWidth * s) + 'px',
-               height: (this.frameHeight * s) + 'px' };
     },
   },
   mounted() {
@@ -916,7 +887,6 @@ const app = Vue.createApp({
           ElMessage.success('登录成功：' + (r.account.nickname || r.account.name));
           this.accountDialogVisible = false;
           this.browserRunning = false;
-      this.frameZoom = 'fit';
           this.loadAccounts();
         } else {
           // 任何失败分支都必须有可见提示（以前静默只改小字，就是「无反应」的来源）
@@ -941,13 +911,6 @@ const app = Vue.createApp({
     startFrameStream() {
       this.stopFrameStream();
       if (!this.browserRunning) return;
-      // 放大模式下保持低频刷新（2 秒/帧）：缩放走 transform（GPU 合成）不再卡主线程，
-      // 且输入事件要随帧一起发送——之前「放大即暂停刷新」会导致放大后打字/点击全部无反应。
-      const interval = this.frameZoom === 'fit' ? 600 : 1800;
-      if (this.frameZoom !== 'fit') {
-        this.browserStatusColor = '#e6a23c';
-        this.browserStatusText = '放大模式：画面低频刷新（约 2 秒一帧）；要实时操作请切回「适应宽度」';
-      }
       this.frameTimer = setInterval(async () => {
         if (this.frameBusy || !this.browserRunning) return;
         this.frameBusy = true;
@@ -971,15 +934,11 @@ const app = Vue.createApp({
           }
         } catch (e) { /* 网络抖动跳过本帧 */ }
         finally { this.frameBusy = false; }
-      }, interval);
+      }, 600);
     },
     stopFrameStream() {
       if (this.frameTimer) { clearInterval(this.frameTimer); this.frameTimer = null; }
       this.frameBusy = false;
-    },
-    // 切换缩放倍率后按新倍率重启帧流（刷新间隔不同）
-    restartFrameStream() {
-      if (this.browserRunning) this.startFrameStream();
     },
     // 二维码特写：只截画面里的二维码，PNG 高清，方便手机直接扫
     async openQrCloseup() {
@@ -1013,15 +972,6 @@ const app = Vue.createApp({
       // 点击后立刻聚焦，让后续键盘事件生效
       if (action === 'pressed') { try { e.currentTarget.focus && e.currentTarget.focus(); } catch (err) {} }
     },
-    frameWheel(e) {
-      // 适应宽度：滚轮留给本地容器滚动（查看整页）；放大：滚轮转发给远端页面
-      if (this.frameZoom === 'fit') return;
-      e.preventDefault();
-      const p = this.framePos(e);
-      if (!p) return;
-      this.pendingEvents.push({ type: 'wheel', x: p.x, y: p.y,
-        dx: Math.round(e.deltaX || 0), dy: Math.round(e.deltaY || 0) });
-    },
     frameKey(e, down) {
       if (!this.browserRunning) return;
       e.preventDefault();
@@ -1050,7 +1000,6 @@ const app = Vue.createApp({
       this.stopBrowserPolling();
       this.stopFrameStream();
       this.browserRunning = false;
-      this.frameZoom = 'fit';
       this.browserChecking = false;
       this.frameDataUrl = '';
       this.browserStatusText = '已关闭';
