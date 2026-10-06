@@ -93,13 +93,20 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
 /* 表格上方的说明文字：放到工具条末尾更省空间，宽屏不换行 */
 .toolbar .hint{font-size:13px;color:#8a919f;margin-left:4px}
 
-/* --- 设置页：宽屏双列布局（密码 + 推送各占一列，或推送内部渠道双列） --- */
-.settings-grid{display:grid;grid-template-columns:minmax(0,440px) minmax(0,1fr);gap:20px;align-items:start}
-@media (max-width:1200px){ .settings-grid{grid-template-columns:1fr} }
+/* --- 设置页布局：上区（密码 + 监控参数并排）下区（推送全宽） --- */
+.settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px;align-items:start}
+.settings-grid .card{margin-top:0}
+.settings-grid .card.full{grid-column:1 / -1}
+@media (max-width:1200px){ .settings-grid{grid-template-columns:1fr} .settings-grid .card.full{grid-column:auto} }
 /* 卡片标题/说明的统一样式（替代散落的内联 style） */
 .card-head{font-size:16px;font-weight:600;color:#22242a;margin-bottom:18px}
 .card-desc{font-size:12px;color:#8a919f;margin:-12px 0 18px}
-.narrow-card .card-head{margin-bottom:20px}
+/* 监控参数：2×2 网格，label 在上、说明在下，避免窄卡片里文字横向挤压换行 */
+.tunable-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px 20px}
+.tunable-label{font-size:13px;color:#606266;margin-bottom:6px;font-weight:500}
+.tunable-hint{font-size:12px;color:#8a919f;margin-top:5px;line-height:1.5}
+.tunable-actions{margin-top:20px}
+@media (max-width:600px){ .tunable-grid{grid-template-columns:1fr} }
 /* 推送渠道在宽屏下两列排布，窄屏自动回落到单列 */
 .notify-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 28px}
 @media (max-width:1100px){ .notify-list{grid-template-columns:1fr} }
@@ -443,7 +450,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
         <!-- 系统设置 -->
         <div v-if="activeTab==='settings'">
           <div class="settings-grid">
-            <div class="card narrow-card">
+            <div class="card">
               <div class="card-head">修改后台密码</div>
               <el-form label-width="90px">
                 <el-form-item label="旧密码"><el-input v-model="pwdForm.old" type="password" show-password></el-input></el-form-item>
@@ -453,33 +460,37 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
               </el-form>
             </div>
 
-            <div class="card narrow-card">
+            <div class="card">
               <div class="card-head">监控参数</div>
               <div class="card-desc">抓取与推送的可调参数，保存后立即生效（无需重启后台）</div>
-              <el-form label-width="110px">
-                <el-form-item label="增量抓取条数">
+              <div class="tunable-grid">
+                <div>
+                  <div class="tunable-label">增量抓取条数</div>
                   <el-input-number v-model="tunables.crawl_num" :min="1" :max="30"></el-input-number>
-                  <span style="margin-left:10px;font-size:12px;color:#8a919f">每次轮询只拉最新 N 条</span>
-                </el-form-item>
-                <el-form-item label="首抓条数">
+                  <div class="tunable-hint">每次轮询只拉最新 N 条</div>
+                </div>
+                <div>
+                  <div class="tunable-label">首抓条数</div>
                   <el-input-number v-model="tunables.first_crawl_num" :min="1" :max="30"></el-input-number>
-                  <span style="margin-left:10px;font-size:12px;color:#8a919f">添加博主时建基线取 N 条</span>
-                </el-form-item>
-                <el-form-item label="并发数">
+                  <div class="tunable-hint">添加博主时建基线取 N 条</div>
+                </div>
+                <div>
+                  <div class="tunable-label">并发数</div>
                   <el-input-number v-model="tunables.max_per_round" :min="1" :max="20"></el-input-number>
-                  <span style="margin-left:10px;font-size:12px;color:#8a919f">每轮最多同时抓 N 个博主</span>
-                </el-form-item>
-                <el-form-item label="推送时效">
+                  <div class="tunable-hint">每轮最多同时抓 N 个博主</div>
+                </div>
+                <div>
+                  <div class="tunable-label">推送时效</div>
                   <el-input-number v-model="tunables.push_max_age_minutes" :min="0" :max="1440"></el-input-number>
-                  <span style="margin-left:10px;font-size:12px;color:#8a919f">分钟，0=不限；发布时间超过则不推送</span>
-                </el-form-item>
-                <el-form-item>
-                  <el-button type="primary" :loading="savingTunables" @click="saveTunables">保存参数</el-button>
-                </el-form-item>
-              </el-form>
+                  <div class="tunable-hint">分钟，0=不限；发布时间超过则不推送</div>
+                </div>
+              </div>
+              <div class="tunable-actions">
+                <el-button type="primary" :loading="savingTunables" @click="saveTunables">保存参数</el-button>
+              </div>
             </div>
 
-            <div class="card">
+            <div class="card full">
               <div class="card-head">新笔记推送</div>
               <div class="card-desc">博主发布新笔记时，自动推送「笔记标题 + 链接」到下方启用的渠道</div>
               <div class="panel-sub" style="display:flex;align-items:center;gap:12px">
