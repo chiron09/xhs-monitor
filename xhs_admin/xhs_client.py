@@ -148,12 +148,16 @@ def fetch_followings(cookie: str, user_id: str, cursor: str = ""):
 def is_pinned(note: dict) -> bool:
     """判断笔记是否为置顶笔记（博主页置顶的旧笔记永远排在最前）。
 
-    小红书笔记置顶标记的字段名不统一，这里做多字段兜底：
-    顶层 is_top / pinned / sticky / is_pinned，或 note_attributes / note_card.attributes 内同名字段。
-    若实际字段名不同，只需改这一处。
+    实际字段（已实测确认）：note["interact_info"]["sticky"] 为 true 表示置顶。
+    下方另保留若干别名兜底，以防不同接口字段略有差异。
     """
     if not isinstance(note, dict):
         return False
+    # 权威字段：interact_info.sticky（布尔）
+    ii = note.get("interact_info")
+    if isinstance(ii, dict) and ii.get("sticky"):
+        return True
+    # 兜底别名
     for key in ("is_top", "pinned", "sticky", "is_pinned"):
         if note.get(key):
             return True
