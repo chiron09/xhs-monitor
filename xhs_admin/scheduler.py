@@ -11,9 +11,9 @@ from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import notifier
-from config import DATA_DIR, MAX_PER_ROUND, MIN_INTERVAL_MINUTES, RATE_LIMIT_KEYWORDS
+from config import CRAWL_NUM, DATA_DIR, MAX_PER_ROUND, MIN_INTERVAL_MINUTES, RATE_LIMIT_KEYWORDS
 from db import Account, Blogger, Note, SessionLocal, Setting
-from xhs_client import fetch_notes_page, normalize_note
+from xhs_client import fetch_notes_page, is_pinned, normalize_note
 
 # 账号异常告警：同一账号 6 小时内最多提醒一次（登录过期 / 风控共用去重）
 _ACCOUNT_ALERT_INTERVAL = 6 * 3600
@@ -49,10 +49,14 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _notify_account_alert(db, account, blogger_name: str, title: str, content: str) -> None:
-    """账号异常告警（跨渠道），带时间窗去重，去重状态落库（重启不丢、多实例共享）。"""
+def _notify_account_alert(db, account, blogger_name: str, title: str, content: str,
+                          dedup_key: str = "acct_alert_ts") -> None:
+    """账号异常告警（跨渠道），带时间窗去重，去重状态落库（重启不丢、多实例共享）。
+
+    dedup_key 区分告警类型：登录过期与风控各自独立去重，互不压制。
+    """
     now = time.time()
-    key = "acct_alert_ts"
+    key = dedup_key
     s = db.get(Setting, key)
     try:
         data = json.loads(s.value) if s and s.value else {}
@@ -81,18 +85,24 @@ def _alert_account_expiry(db, account, blogger_name: str) -> None:
         f"最近受影响博主：{blogger_name}\n"
         f"恢复方法：打开监控后台 → 账号管理 → 点该账号的「更新」→ 浏览器登录一次。\n"
         f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        dedup_key="acct_expiry_ts",
     )
 
 
-def _alert_account_ratelimit(db, account, blogger_name: str) -> None:
-    """账号触发风控告警。"""
+def _alert_account_ratelimit(db, account, blogger_name: str, error: str = "") -> None:
+    """账号触发风控（300011 账号异常）告警。"""
+    code = "300011" if "300011" in (error or "") else ""
+    hint = f"接口返回：{error}" if error else "接口返回 300011（账号异常）"
     _notify_account_alert(
         db, account, blogger_name,
-        "⚠️ 小红书账号触发风控，已暂停抓取",
-        f"账号「{account.name}」返回「账号异常」（风控），已自动暂停 {_ACCOUNT_COOLDOWN_SECONDS // 60} 分钟，"
+        "⚠️ 小红书账号触发风控（300011），已暂停抓取",
+        f"账号「{account.name}」被风控，已自动暂停 {_ACCOUNT_COOLDOWN_SECONDS // 60} 分钟，"
         f"期间该账号下所有博主暂停抓取，避免持续请求加重风控。\n\n"
+        f"错误码：{code or '300011'}\n"
+        f"{hint}\n"
         f"最近受影响博主：{blogger_name}\n"
         f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        dedup_key="acct_ratelimit_ts",
     )
 
 
@@ -340,7 +350,10 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False,
     # 记录本次尝试时间（失败退避用）；成功时间单独记 last_crawled_at
     blogger.last_attempt_at = _now_ms()
 
-    ok, notes, nickname, error = fetch_notes_page(account.cookie, blogger.url)
+    ok, notes, nickname, error = fetch_notes_page(
+        account.cookie, blogger.url,
+        num=1 if establish_baseline else CRAWL_NUM,
+    )
 
     if not ok:
         # 失败：不推进 last_crawled_at，累加 fail_count 做退避
@@ -351,7 +364,7 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False,
         if account and _is_rate_limited(error):
             # 风控：暂停该账号一段时间，避免持续请求加重风控
             _set_account_cooldown(db, account.id, _ACCOUNT_COOLDOWN_SECONDS)
-            _alert_account_ratelimit(db, account, blogger.name)
+            _alert_account_ratelimit(db, account, blogger.name, error)
         elif account and any(k in (error or "") for k in _EXPIRY_KEYWORDS):
             _alert_account_expiry(db, account, blogger.name)
         return {"ok": False, "error": error or "抓取失败"}
@@ -361,16 +374,24 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False,
     blogger.last_crawled_at = _now_ms()
     blogger.last_error = ""
 
-    normalized = [
-        normalize_note(n) for n in notes
-        if isinstance(n, dict) and n.get("note_id")
-    ]
+    # 归一化：跳过置顶笔记，再做早停（列表按时间倒序，遇到「非今天」的旧笔记即可停止）。
+    # 置顶笔记永远排最前，必须 continue 跳过而非 break；publish_time 缺失(0)不触发早停。
+    normalized = []
+    for n in notes:
+        if not (isinstance(n, dict) and n.get("note_id")):
+            continue
+        if is_pinned(n):
+            continue
+        norm = normalize_note(n)
+        pt = norm.get("publish_time") or 0
+        if pt > 0 and not _is_published_today(pt):
+            break
+        normalized.append(norm)
     current_ids = [n["note_id"] for n in normalized]
     baseline = _get_baseline(blogger)
 
-    if establish_baseline or not baseline:
-        # 基线为空（首次成功抓取，或此前基线未建成）：先补基线，
-        # 绝不把博主添加之前的旧笔记当成"新笔记"入库。
+    if establish_baseline:
+        # 添加博主那一刻：只建基线，不识别新笔记（绝不把添加前的旧笔记当新笔记）。
         candidates = []
     else:
         known = set(baseline)

@@ -322,18 +322,19 @@ class XHS_Apis():
             msg = _log_api_error(e)
         return success, msg, res_json
 
-    def get_user_note_info(self, user_id: str, cursor: str, xsec_token='', xsec_source='', proxies: dict = None):
+    def get_user_note_info(self, user_id: str, cursor: str, xsec_token='', xsec_source='', proxies: dict = None, num: int = 30):
         """
             获取用户指定位置的笔记
             :param user_id: 你想要获取的用户的id
             :param cursor: 你想要获取的笔记的cursor
+            :param num: 拉取条数（默认 30；增量抓取时可传小值只取最新几条）
             返回用户指定位置的笔记
         """
         res_json = None
         try:
             api = f"/api/sns/web/v1/user_posted"
             params = {
-                "num": "30",
+                "num": str(int(num or 30)),
                 "cursor": cursor,
                 "user_id": user_id,
                 "image_formats": "jpg,webp,avif",

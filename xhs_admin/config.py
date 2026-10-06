@@ -36,6 +36,10 @@ SALT = os.environ.get("XHS_ADMIN_SALT") or "xhs-admin-local-2026"
 # scheduler 的自适应退避、账号检测接口都引用同一份。
 RATE_LIMIT_KEYWORDS = ("账号异常", "稍后重试", "300011", "风控", "操作频繁")
 
+# 每次抓取拉取的最新笔记条数（增量抓取：首抓与后续轮询都用这个值，
+# 只取最新 N 条，不再每次拉 30 条重复处理旧笔记）。可用 XHS_ADMIN_CRAWL_NUM 覆盖。
+CRAWL_NUM = int(os.environ.get("XHS_ADMIN_CRAWL_NUM") or 5)
+
 
 def hash_password(pwd: str) -> str:
     import hashlib

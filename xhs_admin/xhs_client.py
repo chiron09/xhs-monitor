@@ -10,7 +10,7 @@ import os
 import sys
 import urllib.parse
 
-from config import SDK_DIR
+from config import CRAWL_NUM, SDK_DIR
 
 if SDK_DIR not in sys.path:
     sys.path.insert(0, SDK_DIR)
@@ -69,7 +69,7 @@ def check_crawl(cookie: str, user_id: str):
         return False, "缺少 user_id，无法探测抓取能力"
     try:
         api = _build_api(cookie)
-        success, msg, data = api.get_user_note_info(user_id, "", "", "pc_search")
+        success, msg, data = api.get_user_note_info(user_id, "", "", "pc_search", num=1)
         if not success:
             err = str(msg or "")
             # SDK 在响应缺 success 字段时抛 KeyError，真实错误在 data 里
@@ -84,8 +84,8 @@ def check_crawl(cookie: str, user_id: str):
         return False, str(e)
 
 
-def fetch_notes_page(cookie: str, url: str):
-    """抓博主最新一页笔记。返回 (ok, notes_list, nickname, error)。"""
+def fetch_notes_page(cookie: str, url: str, num: int = CRAWL_NUM):
+    """抓博主最新一页笔记（默认只取最新 CRAWL_NUM 条，增量抓取）。返回 (ok, notes_list, nickname, error)。"""
     uid = extract_user_id(url)
     if not uid:
         return False, [], "", "无法从链接解析 user_id（应为 24 位十六进制）"
@@ -95,7 +95,7 @@ def fetch_notes_page(cookie: str, url: str):
         q = urllib.parse.parse_qs(parsed.query)
         xsec_token = q.get("xsec_token", [""])[0]
         xsec_source = q.get("xsec_source", ["pc_search"])[0]
-        success, msg, data = api.get_user_note_info(uid, "", xsec_token, xsec_source)
+        success, msg, data = api.get_user_note_info(uid, "", xsec_token, xsec_source, num=num)
         if not success:
             err = str(msg or "")
             # SDK 在响应缺 'success' 字段时（风控/账号异常，如 code 300011）会抛 KeyError，
@@ -143,6 +143,30 @@ def fetch_followings(cookie: str, user_id: str, cursor: str = ""):
         return True, users, str(d.get("cursor") or ""), bool(d.get("has_more")), ""
     except Exception as e:  # noqa: BLE001
         return False, [], "", False, str(e)
+
+
+def is_pinned(note: dict) -> bool:
+    """判断笔记是否为置顶笔记（博主页置顶的旧笔记永远排在最前）。
+
+    小红书笔记置顶标记的字段名不统一，这里做多字段兜底：
+    顶层 is_top / pinned / sticky / is_pinned，或 note_attributes / note_card.attributes 内同名字段。
+    若实际字段名不同，只需改这一处。
+    """
+    if not isinstance(note, dict):
+        return False
+    for key in ("is_top", "pinned", "sticky", "is_pinned"):
+        if note.get(key):
+            return True
+    attrs = note.get("note_attributes")
+    if not isinstance(attrs, dict):
+        card = note.get("note_card")
+        if isinstance(card, dict):
+            attrs = card.get("attributes") or card
+    if isinstance(attrs, dict):
+        for key in ("is_top", "pinned", "sticky", "is_pinned", "is_sticky"):
+            if attrs.get(key):
+                return True
+    return False
 
 
 def normalize_note(n: dict) -> dict:
