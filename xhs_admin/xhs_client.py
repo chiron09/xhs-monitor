@@ -20,7 +20,10 @@ from xhs_utils.xhs_pc import XHSPcAuth  # noqa: E402
 
 
 def _build_api(cookie: str):
-    return XHS_Apis(XHSPcAuth.from_cookie(cookie)).bootstrap()
+    # XHSPcAuth.from_cookie() 内部已调用 XHS_Apis(auth).bootstrap() 解析 user_id，
+    # 无需再显式 bootstrap —— 重复调用会让每次抓取多打一次 get_user_me（约 1~2s）。
+    # 保留 fresh auth 对象（签名状态 per-request，天然线程安全），只省掉冗余网络往返。
+    return XHS_Apis(XHSPcAuth.from_cookie(cookie))
 
 
 def check_cookie(cookie: str):
