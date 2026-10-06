@@ -15,7 +15,8 @@ from config import DATA_DIR, MAX_PER_ROUND, MIN_INTERVAL_MINUTES, PUSH_MAX_AGE_M
 from db import Account, Blogger, Note, SessionLocal, Setting
 from xhs_client import fetch_notes_page, is_pinned, normalize_note
 
-# 账号异常告警：同一账号 6 小时内最多提醒一次（登录过期 / 风控共用去重）
+# 账号异常告警：登录过期这类「持续状态」默认 6 小时内最多提醒一次；
+# 风控是「冷却后重试」的周期事件，用冷却周期(30分钟)作去重窗口，让每次新风控都告警。
 _ACCOUNT_ALERT_INTERVAL = 6 * 3600
 _EXPIRY_KEYWORDS = ("登录已过期", "未登录", "登录态无效", "登录态失效", "登录信息")
 _ACCOUNT_COOLDOWN_SECONDS = 30 * 60  # 风控后暂停该账号 30 分钟
@@ -50,30 +51,69 @@ def _now_ms() -> int:
 
 
 def _notify_account_alert(db, account, blogger_name: str, title: str, content: str,
-                          dedup_key: str = "acct_alert_ts") -> None:
+                          dedup_key: str = "acct_alert_ts",
+                          dedup_interval: int = _ACCOUNT_ALERT_INTERVAL) -> bool:
     """账号异常告警（跨渠道），带时间窗去重，去重状态落库（重启不丢、多实例共享）。
 
-    dedup_key 区分告警类型：登录过期与风控各自独立去重，互不压制。
+    dedup_key 区分告警类型（登录过期 / 风控各自独立去重，互不压制）。
+    dedup_interval 控制去重窗口：风控=冷却周期(30分钟)，登录过期=6小时。
+    返回 True 表示这是一次「新的告警事件」（去重通过、已尝试推送）；
+    False 表示被去重窗口跳过（不算新事件）。推送成败写入日志。
     """
     now = time.time()
-    key = dedup_key
-    s = db.get(Setting, key)
+    s = db.get(Setting, dedup_key)
     try:
         data = json.loads(s.value) if s and s.value else {}
     except Exception:  # noqa: BLE001
         data = {}
-    if now - float(data.get(str(account.id), 0) or 0) < _ACCOUNT_ALERT_INTERVAL:
-        return
+    if now - float(data.get(str(account.id), 0) or 0) < dedup_interval:
+        return False
     data[str(account.id)] = now
     if s:
         s.value = json.dumps(data)
     else:
-        db.add(Setting(key=key, value=json.dumps(data)))
+        db.add(Setting(key=dedup_key, value=json.dumps(data)))
     db.commit()
     try:
-        notifier.notify_custom(notifier.get_config(db), title, content)
+        result = notifier.notify_custom(notifier.get_config(db), title, content)
+    except Exception as e:  # noqa: BLE001
+        _LOG.warning("账号告警推送异常（%s）: %s", title, e)
+    else:
+        ok = (result or {}).get("ok_count", 0)
+        if ok:
+            _LOG.info("账号告警已推送（%d 渠道）: %s", ok, title)
+        else:
+            _LOG.warning("账号告警推送无成功渠道（%s）: failures=%s",
+                         title, (result or {}).get("failures"))
+    return True
+
+
+def _record_ratelimit(db, account, blogger_name: str, error: str = "") -> None:
+    """记录每次风控的具体时间（落库历史，最多保留 50 条，重启不丢）。"""
+    key = "acct_ratelimit_log"
+    s = db.get(Setting, key)
+    try:
+        log = json.loads(s.value) if s and s.value else []
     except Exception:  # noqa: BLE001
-        pass
+        log = []
+    if not isinstance(log, list):
+        log = []
+    entry = {
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "account_id": account.id,
+        "account": account.name,
+        "blogger": blogger_name,
+        "error": error or "",
+    }
+    log.append(entry)
+    log = log[-50:]
+    if s:
+        s.value = json.dumps(log, ensure_ascii=False)
+    else:
+        db.add(Setting(key=key, value=json.dumps(log, ensure_ascii=False)))
+    db.commit()
+    _LOG.info("记录风控 账号#%s %s 时间=%s error=%s",
+              account.id, account.name, entry["time"], error or "")
 
 
 def _alert_account_expiry(db, account, blogger_name: str) -> None:
@@ -90,10 +130,10 @@ def _alert_account_expiry(db, account, blogger_name: str) -> None:
 
 
 def _alert_account_ratelimit(db, account, blogger_name: str, error: str = "") -> None:
-    """账号触发风控（300011 账号异常）告警。"""
+    """账号触发风控（300011 账号异常）：记录风控时间 + 告警推送。"""
     code = "300011" if "300011" in (error or "") else ""
     hint = f"接口返回：{error}" if error else "接口返回 300011（账号异常）"
-    _notify_account_alert(
+    is_new = _notify_account_alert(
         db, account, blogger_name,
         "⚠️ 小红书账号触发风控（300011），已暂停抓取",
         f"账号「{account.name}」被风控，已自动暂停 {_ACCOUNT_COOLDOWN_SECONDS // 60} 分钟，"
@@ -103,7 +143,11 @@ def _alert_account_ratelimit(db, account, blogger_name: str, error: str = "") ->
         f"最近受影响博主：{blogger_name}\n"
         f"时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         dedup_key="acct_ratelimit_ts",
+        dedup_interval=_ACCOUNT_COOLDOWN_SECONDS,  # 30 分钟：每次新风控事件都告警
     )
+    if is_new:
+        # 只在「新风控事件」时记录具体时间，避免冷却内重复触发导致历史重复
+        _record_ratelimit(db, account, blogger_name, error)
 
 
 def _account_cooldown_until(db, account_id) -> float:
