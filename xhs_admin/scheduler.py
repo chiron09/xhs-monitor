@@ -11,15 +11,13 @@ from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import notifier
-from config import DATA_DIR, MAX_PER_ROUND, MIN_INTERVAL_MINUTES
+from config import DATA_DIR, MAX_PER_ROUND, MIN_INTERVAL_MINUTES, RATE_LIMIT_KEYWORDS
 from db import Account, Blogger, Note, SessionLocal, Setting
 from xhs_client import fetch_notes_page, normalize_note
 
 # 账号异常告警：同一账号 6 小时内最多提醒一次（登录过期 / 风控共用去重）
 _ACCOUNT_ALERT_INTERVAL = 6 * 3600
 _EXPIRY_KEYWORDS = ("登录已过期", "未登录", "登录态无效", "登录态失效", "登录信息")
-# 风控关键词：命中即暂停该账号一段时间（自适应退避），避免持续请求加重风控
-_RATE_LIMIT_KEYWORDS = ("账号异常", "稍后重试", "300011", "风控", "操作频繁")
 _ACCOUNT_COOLDOWN_SECONDS = 30 * 60  # 风控后暂停该账号 30 分钟
 
 # 推送补偿：失败笔记最多重试次数、重试冷却（秒）
@@ -124,7 +122,7 @@ def _set_account_cooldown(db, account_id, seconds: int) -> None:
 
 
 def _is_rate_limited(error) -> bool:
-    return any(k in (error or "") for k in _RATE_LIMIT_KEYWORDS)
+    return any(k in (error or "") for k in RATE_LIMIT_KEYWORDS)
 
 
 def _get_baseline(blogger: Blogger) -> list:

@@ -1030,8 +1030,9 @@ const app = Vue.createApp({
     },
     async checkAccount(row) {
       const d = await this.api('/api/accounts/' + row.id + '/check', 'POST');
-      if (d.ok) ElMessage.success('账号有效：' + (d.item.nickname || d.item.name));
-      else ElMessage.error('账号已失效：' + (d.error || ''));
+      if (!d.ok) ElMessage.error('账号已失效：' + (d.error || ''));
+      else if (d.rate_limited) ElMessage.warning('账号被风控：' + (d.rate_limit_msg || '账号异常，请稍后重试'));
+      else ElMessage.success('账号正常：' + (d.item.nickname || d.item.name));
       this.loadAccounts();
     },
     deleteAccount(row) {
@@ -1226,8 +1227,8 @@ const app = Vue.createApp({
     },
 
     /* 工具 */
-    statusType(s) { return s==='active'?'success':s==='expired'?'danger':s==='paused'?'warning':'info'; },
-    statusText(s) { return { active:'有效', expired:'已失效', unknown:'未知', paused:'已暂停' }[s] || s; },
+    statusType(s) { return s==='active'?'success':s==='expired'?'danger':s==='rate_limited'?'warning':s==='paused'?'warning':'info'; },
+    statusText(s) { return { active:'有效', expired:'已失效', rate_limited:'风控中', unknown:'未知', paused:'已暂停' }[s] || s; },
     fmtTime(ms) { if (!ms) return '—'; return new Date(ms).toLocaleString('zh-CN', { hour12:false }); },
   }
 });

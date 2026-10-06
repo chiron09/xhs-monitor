@@ -59,6 +59,31 @@ def extract_user_id(url: str) -> str:
         return ""
 
 
+def check_crawl(cookie: str, user_id: str):
+    """探测账号抓取能力（风控检测）。返回 (ok, error)。
+
+    get_user_me 即使账号被风控仍返回 success，只有 get_user_note_info（user_posted）
+    会返回 300011「账号异常」。用账号自身 user_id 拉一次，命中即风控。
+    """
+    if not user_id:
+        return False, "缺少 user_id，无法探测抓取能力"
+    try:
+        api = _build_api(cookie)
+        success, msg, data = api.get_user_note_info(user_id, "", "", "pc_search")
+        if not success:
+            err = str(msg or "")
+            # SDK 在响应缺 success 字段时抛 KeyError，真实错误在 data 里
+            if isinstance(data, dict) and (data.get("msg") or data.get("code")):
+                parts = [str(data.get("msg") or "").strip()]
+                if data.get("code"):
+                    parts.append(f"code {data['code']}")
+                err = "，".join(p for p in parts if p)
+            return False, err
+        return True, ""
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)
+
+
 def fetch_notes_page(cookie: str, url: str):
     """抓博主最新一页笔记。返回 (ok, notes_list, nickname, error)。"""
     uid = extract_user_id(url)

@@ -20,7 +20,7 @@ import covers
 import notifier
 import scheduler
 import xhs_client
-from config import DEFAULT_PASSWORD, MIN_INTERVAL_MINUTES, STATIC_DIR, TOKEN_TTL, hash_password
+from config import DEFAULT_PASSWORD, MIN_INTERVAL_MINUTES, RATE_LIMIT_KEYWORDS, STATIC_DIR, TOKEN_TTL, hash_password
 from db import Account, AuthToken, Blogger, Note, SessionLocal, Setting
 
 # ---- 登录 token（持久化到 auth_tokens 表，重启后台不掉登录） ----
@@ -468,13 +468,33 @@ def check_account(account_id: int, _=Depends(require_auth)):
         if not acc:
             raise HTTPException(status_code=404, detail="账号不存在")
         ok, nickname, uid, err = xhs_client.check_cookie(acc.cookie)
-        acc.status = "active" if ok else "expired"
+        rate_limited = False
+        rate_limit_msg = ""
         if ok:
             acc.nickname = nickname or acc.nickname
             acc.xhs_user_id = uid or acc.xhs_user_id
+            # 风控探测：get_user_me 被风控也返回成功，只有抓笔记接口会报 300011
+            probe_uid = uid or acc.xhs_user_id
+            if probe_uid:
+                c_ok, c_err = xhs_client.check_crawl(acc.cookie, probe_uid)
+                if not c_ok and any(k in (c_err or "") for k in RATE_LIMIT_KEYWORDS):
+                    rate_limited = True
+                    rate_limit_msg = c_err
+        if not ok:
+            acc.status = "expired"
+        elif rate_limited:
+            acc.status = "rate_limited"
+        else:
+            acc.status = "active"
         acc.last_checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         db.commit()
-        return {"ok": ok, "error": err, "item": acc.to_dict()}
+        return {
+            "ok": ok,
+            "error": err,
+            "rate_limited": rate_limited,
+            "rate_limit_msg": rate_limit_msg,
+            "item": acc.to_dict(),
+        }
     finally:
         db.close()
 

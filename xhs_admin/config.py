@@ -32,6 +32,10 @@ MAX_PER_ROUND = int(os.environ.get("XHS_ADMIN_MAX_PER_ROUND") or 4)
 # 密码加盐（本机后台，固定盐即可；可用环境变量覆盖）
 SALT = os.environ.get("XHS_ADMIN_SALT") or "xhs-admin-local-2026"
 
+# 风控关键词：抓笔记接口命中这些字样即视为账号被风控（300011「账号异常」等）。
+# scheduler 的自适应退避、账号检测接口都引用同一份。
+RATE_LIMIT_KEYWORDS = ("账号异常", "稍后重试", "300011", "风控", "操作频繁")
+
 
 def hash_password(pwd: str) -> str:
     import hashlib
