@@ -127,13 +127,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
 /* 浏览器登录 tab：把弹窗撑开，内嵌画面才够大、二维码才扫得清
    （必须放在下面所有 @media 之外，否则窄屏规则把它盖掉）
    弹窗宽度：只在该 tab 下生效，覆盖 el-dialog 上的 width="560px" 内联宽度。
-   用 !important 压过 Element Plus 写在 style 上的宽度。 */
-.el-dialog.wide-login{width:92vw !important;max-width:92vw !important;margin-top:2vh !important}
+   用 !important 压过 Element Plus 写在 style 上的宽度。
+   max-width 1680px：画面源图 CSS 宽 1584px，弹窗再宽只会把图放大变糊。 */
+.el-dialog.wide-login{width:92vw !important;max-width:1680px !important;margin-top:2vh !important}
 .el-dialog.wide-login .el-dialog__body{padding:12px 16px;max-height:88vh;overflow:auto}
-/* 浏览器登录画面容器：撑满弹窗宽度，并给足高度 */
-.login-frame-wrap{width:100%;max-width:100%;margin:10px auto;background:#fff;border:1px solid #dcdfe6;border-radius:8px;overflow:auto;-webkit-overflow-scrolling:touch}
-/* 画面高度自适应：视口越高画面越高，最少 420px，最多 78vh */
-.login-frame-view{display:flex;align-items:flex-start;justify-content:center;min-height:clamp(420px,62vh,78vh)}
+/* 浏览器登录画面容器：撑满弹窗宽度；限高（弹窗 body 88vh 减去按钮/提示区约 300px），
+   画面超出在容器内滚动，避免弹窗 body 出现第二根滚动条 */
+.login-frame-wrap{width:100%;max-width:100%;max-height:max(320px,calc(88vh - 300px));margin:10px auto;background:#fff;border:1px solid #dcdfe6;border-radius:8px;overflow:auto;-webkit-overflow-scrolling:touch}
+/* 画面内容块：尺寸由 frameBoxStyle 控制（fit=自适应 / 放大=显式宽高） */
+.login-frame-view{display:block}
 .login-frame-hint{max-width:100%;margin:0 auto;padding:8px 12px;font-size:12px;color:#8a919f;text-align:center;line-height:1.7}
 
 /* ================= 响应式：窄屏 / 手机适配 ================= */
@@ -183,8 +185,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
   /* ---- 弹窗：满宽、内容可滚动、底部按钮不贴边 ---- */
   .el-dialog{width:94vw !important;max-width:94vw !important;margin-top:5vh !important;border-radius:12px}
   .el-dialog.wide-login{margin-top:2vh !important}
-  /* 手机端登录画面：不强制最小高度，跟随图片自身比例 */
-  .login-frame-view{min-height:0}
+  /* 手机端登录画面容器限高改为随内容（弹窗 body 自身已限高滚动） */
+  .login-frame-wrap{max-height:none}
   .el-dialog__header{padding:14px 16px 10px}
   .el-dialog__body{padding:12px 14px;max-height:74vh;overflow:auto;-webkit-overflow-scrolling:touch}
   .el-dialog__footer{padding:10px 14px 14px}
@@ -520,7 +522,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
           </el-alert>
           <div style="text-align:center;padding:4px 0 10px">
             <el-button type="danger" size="large" :loading="browserLoading" @click="startBrowserLogin">{{ browserRunning ? '重新加载登录页' : '打开登录页' }}</el-button>
-            <el-button v-if="browserRunning && !browserChecking" type="success" size="large" :loading="browserChecking" @click="checkBrowserLogin">完成登录，读取登录态</el-button>
+            <el-button v-if="browserRunning" type="success" size="large" :loading="browserChecking" @click="checkBrowserLogin">完成登录，读取登录态</el-button>
             <el-button v-if="browserRunning" size="small" @click="stopBrowserLogin">关闭</el-button>
             <div :style="{marginTop:'10px',fontSize:'13px',color:browserStatusColor}">{{ browserStatusText || '点击按钮，登录页将显示在下方画面中' }}</div>
             <div v-show="browserRunning" class="frame-zoom" style="margin:8px auto 0;display:flex;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap">
@@ -537,13 +539,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
           </div>
           <div v-show="browserRunning" class="login-frame-wrap">
             <div class="login-frame-view" :style="frameBoxStyle">
-            <img id="loginFrame" :src="frameDataUrl" tabindex="0" @load="frameLoaded"
+            <img id="loginFrame" :src="frameDataUrl" tabindex="0"
                  :style="frameImgStyle"
                  style="display:block;user-select:none;-webkit-user-drag:none;outline:none;cursor:text"
                  @mousedown.prevent="frameMouse($event,'pressed')"
                  @mouseup.prevent="frameMouse($event,'released')"
                  @mousemove="frameMouse($event,'moved')"
-                 @wheel.prevent="frameWheel($event)"
+                 @wheel="frameWheel($event)"
                  @keydown="frameKey($event, true)"
                  @keyup="frameKey($event, false)"
                  @contextmenu.prevent>
@@ -558,9 +560,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
   </el-dialog>
 
   <!-- 二维码特写（浏览器登录画面里的二维码放大图） -->
-  <el-dialog v-model="qrCloseupVisible" title="扫码登录 — 二维码特写" width="420px" align-center
+  <el-dialog v-model="qrCloseupVisible" title="扫码登录 — 二维码特写" width="520px" align-center
              append-to-body>
-    <img v-if="qrCloseImage" :src="qrCloseImage" style="display:block;width:260px;max-width:78vw;height:auto;margin:0 auto;border:1px solid #ebeef5;border-radius:8px;background:#fff">
+    <img v-if="qrCloseImage" :src="qrCloseImage" style="display:block;width:420px;max-width:78vw;height:auto;margin:0 auto;border:1px solid #ebeef5;border-radius:8px;background:#fff">
     <div style="margin-top:12px;text-align:center;font-size:12px;color:#8a919f;line-height:1.7">
       用手机「小红书」App 扫这张码即可登录。<br>二维码会随画面刷新，若已过期请关闭后重新打开登录页。
     </div>
@@ -938,12 +940,13 @@ const app = Vue.createApp({
     // ---- 内嵌画面：截图流 + 输入转发 ----
     startFrameStream() {
       this.stopFrameStream();
-      // 放大状态下每帧重绘 3000px 宽的大图会把浏览器主线程压死（实测卡 20 秒以上）。
-      // 放大时画面本来就是拿来「看清楚/扫码」的，直接停刷新，切回适应宽度再恢复。
+      if (!this.browserRunning) return;
+      // 放大模式下保持低频刷新（2 秒/帧）：缩放走 transform（GPU 合成）不再卡主线程，
+      // 且输入事件要随帧一起发送——之前「放大即暂停刷新」会导致放大后打字/点击全部无反应。
+      const interval = this.frameZoom === 'fit' ? 600 : 1800;
       if (this.frameZoom !== 'fit') {
         this.browserStatusColor = '#e6a23c';
-        this.browserStatusText = '已放大查看，画面暂停刷新；要继续实时操作请切回「适应宽度」';
-        return;
+        this.browserStatusText = '放大模式：画面低频刷新（约 2 秒一帧）；要实时操作请切回「适应宽度」';
       }
       this.frameTimer = setInterval(async () => {
         if (this.frameBusy || !this.browserRunning) return;
@@ -963,21 +966,20 @@ const app = Vue.createApp({
             this.frameDataUrl = r.image;
             this.frameWidth = r.width || 0;
             this.frameHeight = r.height || 0;
+            // 第一帧到达后清掉「正在启动登录页…」；其余状态（就绪/校验计时等）不碰
+            if (this.browserStatusText === '正在启动登录页…') this.browserStatusText = '';
           }
         } catch (e) { /* 网络抖动跳过本帧 */ }
         finally { this.frameBusy = false; }
-        // 放大状态下每帧要把 2400x1500 的图重新缩放到 3000px 宽绘制，
-        // 软件渲染会卡住主线程；放大时降帧率（看场景不需要高频刷新）
-      }, this.frameZoom === 'fit' ? 600 : 1500);
+      }, interval);
     },
     stopFrameStream() {
       if (this.frameTimer) { clearInterval(this.frameTimer); this.frameTimer = null; }
       this.frameBusy = false;
     },
-    frameLoaded() { if (this.browserRunning) this.browserStatusText = ''; },
-    // 切换缩放倍率要按新倍率重启帧流（间隔不一样）
+    // 切换缩放倍率后按新倍率重启帧流（刷新间隔不同）
     restartFrameStream() {
-      if (this.frameTimer && this.browserRunning) this.startFrameStream();
+      if (this.browserRunning) this.startFrameStream();
     },
     // 二维码特写：只截画面里的二维码，PNG 高清，方便手机直接扫
     async openQrCloseup() {
@@ -1012,6 +1014,9 @@ const app = Vue.createApp({
       if (action === 'pressed') { try { e.currentTarget.focus && e.currentTarget.focus(); } catch (err) {} }
     },
     frameWheel(e) {
+      // 适应宽度：滚轮留给本地容器滚动（查看整页）；放大：滚轮转发给远端页面
+      if (this.frameZoom === 'fit') return;
+      e.preventDefault();
       const p = this.framePos(e);
       if (!p) return;
       this.pendingEvents.push({ type: 'wheel', x: p.x, y: p.y,

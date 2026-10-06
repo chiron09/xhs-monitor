@@ -209,9 +209,13 @@ def _check_window(start: str, end: str) -> None:
 
 
 # ---------- 页面 ----------
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 def index():
-    return FileResponse(os.path.join(STATIC_DIR, "index.html"))
+    # no-cache：HTML 每次都向服务器校验（ETag/Last-Modified），改版后浏览器不会
+    # 拿旧缓存白屏或用旧样式。vendor 静态资源走 StaticFiles 自带的 ETag 校验。
+    # 同时支持 HEAD（健康检查/浏览器预检不再 405）。
+    return FileResponse(os.path.join(STATIC_DIR, "index.html"),
+                        headers={"Cache-Control": "no-cache"})
 
 
 # ---------- 认证 ----------

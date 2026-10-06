@@ -770,15 +770,23 @@ def snapshot() -> tuple[bool, str, int, int]:
         ws = _cdp_connect(ws_url)
         _cdp(ws, "Page.enable")
         metrics = _cdp(ws, "Page.getLayoutMetrics", msg_id=2)
-        css = (metrics.get("result") or {}).get("cssContentSize") or {}
-        cw = int(css.get("width") or VIEWPORT[0])
-        ch = int(css.get("height") or VIEWPORT[1])
+        res = metrics.get("result") or {}
+        # 用视口尺寸而非页面内容尺寸：cssContentSize 是整个可滚动内容的大小
+        # （登录页内容可能 3564x1904），拿它当画面会把整页塞进一帧、内容变小，
+        # 且前端按它换算鼠标坐标会整体偏移。视口才是用户"看到"的区域。
+        lay = res.get("cssLayoutViewport") or {}
+        vis = res.get("cssVisualViewport") or {}
+        cw = int(round(lay.get("width") or vis.get("width") or VIEWPORT[0]))
+        ch = int(round(lay.get("height") or vis.get("height") or VIEWPORT[1]))
+        # 视口在页面坐标系里的偏移（页面滚动后 clip 要跟着走，否则截到页首）
+        sx = int(round(vis.get("pageX") or 0))
+        sy = int(round(vis.get("pageY") or 0))
         # 高分截图走 clip.scale：不动页面布局（坐标换算照旧），
         # 比 Emulation.setDeviceMetricsOverride 稳（后者首次调用会把无头合成器卡死）
         capture = {"format": "jpeg", "quality": SHOT_QUALITY,
                    "captureBeyondViewport": False}
         if SHOT_DSF > 1:
-            capture["clip"] = {"x": 0, "y": 0, "width": cw, "height": ch,
+            capture["clip"] = {"x": sx, "y": sy, "width": cw, "height": ch,
                                "scale": SHOT_DSF}
         shot = _cdp(ws, "Page.captureScreenshot", capture, msg_id=3)
         data = (shot.get("result") or {}).get("data") or ""
