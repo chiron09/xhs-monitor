@@ -151,31 +151,70 @@ def fetch_notes_page(cookie: str, url: str, num: int = CRAWL_NUM, account_user_i
         return False, [], "", str(e)
 
 
+def _fetch_followings_page(api, user_id: str, cursor: str, num: int):
+    """复用已构建的 api 拉取一页关注列表。返回 (ok, users, cursor, has_more, error)。"""
+    a = "/api/sns/web/v1/user/followings"
+    params = {"num": str(num), "cursor": cursor, "user_id": user_id}
+    sa = splice_str(a, params)
+    headers, cks, _ = api._request_params(sa, "", "GET")
+    resp = api.http.get(
+        api.base_url + sa,
+        headers=headers,
+        cookies=cks,
+        proxies=api._proxies(None),
+        timeout=15,
+    )
+    body = resp.json()
+    if not body.get("success"):
+        return False, [], "", False, body.get("msg") or "获取关注列表失败"
+    d = body.get("data") or {}
+    users = d.get("users") or []
+    return True, users, str(d.get("cursor") or ""), bool(d.get("has_more")), ""
+
+
 def fetch_followings(cookie: str, user_id: str, cursor: str = ""):
     """获取账号关注列表一页。返回 (ok, users, cursor, has_more, error)。"""
     if not user_id:
         return False, [], "", False, "缺少 user_id"
     try:
         api = _build_api(cookie)
-        a = "/api/sns/web/v1/user/followings"
-        params = {"num": "30", "cursor": cursor, "user_id": user_id}
-        sa = splice_str(a, params)
-        headers, cks, _ = api._request_params(sa, "", "GET")
-        resp = api.http.get(
-            api.base_url + sa,
-            headers=headers,
-            cookies=cks,
-            proxies=api._proxies(None),
-            timeout=15,
-        )
-        body = resp.json()
-        if not body.get("success"):
-            return False, [], "", False, body.get("msg") or "获取关注列表失败"
-        d = body.get("data") or {}
-        users = d.get("users") or []
-        return True, users, str(d.get("cursor") or ""), bool(d.get("has_more")), ""
+        return _fetch_followings_page(api, user_id, cursor, 30)
     except Exception as e:  # noqa: BLE001
         return False, [], "", False, str(e)
+
+
+def fetch_all_followings(cookie: str, user_id: str, num: int = 30, max_pages: int = 100):
+    """一次性拉取账号全部关注列表。返回 (ok, users, error)。
+
+    相比逐页 fetch_followings（每页都 _build_api → from_cookie 内部 bootstrap 一次
+    get_user_me），这里只构建一次 auth 并全程复用，翻页每页仅 1 次 followings 请求：
+    - 已知 user_id 时用 _auth_without_bootstrap 直接构造，连首次 get_user_me 也省掉；
+    - 不再每页重复 bootstrap，N 页从约 2N 次请求降到 N 次。
+    """
+    if not user_id:
+        return False, [], "缺少 user_id"
+    auth = None
+    try:
+        auth = _auth_without_bootstrap(cookie, user_id)
+        api = XHS_Apis(auth)
+        all_users = []
+        cursor = ""
+        for _ in range(max_pages):
+            ok, users, cursor, has_more, err = _fetch_followings_page(api, user_id, cursor, num)
+            if not ok:
+                return False, [], err
+            all_users.extend(users)
+            if not has_more or not cursor:
+                break
+        return True, all_users, ""
+    except Exception as e:  # noqa: BLE001
+        return False, [], str(e)
+    finally:
+        if auth is not None:
+            try:
+                auth.close()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def is_pinned(note: dict) -> bool:

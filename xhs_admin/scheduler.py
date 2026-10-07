@@ -553,6 +553,11 @@ def refresh_blogger(db, blogger_id: int, *, account_id: int = 0,
     if not blogger:
         return {"ok": False, "error": "博主不存在"}
 
+    # 拉黑的博主：定时监控与手动抓取都拒绝（status 非 active 本就不会进调度队列，
+    # 这里拦截手动抓取接口 force=True 的路径）
+    if blogger.status == "blocked":
+        return {"ok": False, "error": "博主已拉黑，不监控"}
+
     if not force and not establish_baseline and not in_monitor_window(blogger):
         return {"ok": False, "error": "当前不在监控时段", "skipped_by_window": True}
 

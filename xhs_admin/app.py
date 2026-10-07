@@ -590,6 +590,12 @@ def create_blogger(req: BloggerCreate, _=Depends(require_auth)):
         raise HTTPException(status_code=400, detail="链接无效：无法解析 user_id（应为 24 位十六进制）")
     db = SessionLocal()
     try:
+        # 防重复添加：按 user_id 判断是否已存在（拉黑/未拉黑都拦截）
+        existing = db.query(Blogger).filter(Blogger.xhs_user_id == uid).first()
+        if existing:
+            if existing.status == "blocked":
+                raise HTTPException(status_code=400, detail="该博主已被拉黑，请先取消拉黑")
+            raise HTTPException(status_code=400, detail="该博主已存在，请勿重复添加")
         m_start = _norm_hhmm(req.monitor_start)
         m_end = _norm_hhmm(req.monitor_end)
         _check_window(m_start, m_end)
@@ -642,6 +648,8 @@ def update_blogger(blogger_id: int, req: BloggerUpdate, _=Depends(require_auth))
             b.monitor_start = m_start
             b.monitor_end = m_end
         if req.status is not None:
+            if req.status not in ("active", "paused", "blocked"):
+                raise HTTPException(status_code=400, detail="状态不合法（仅支持 active/paused/blocked）")
             b.status = req.status
         db.commit()
         db.refresh(b)
@@ -698,16 +706,11 @@ def list_followings(req: FollowingsListRequest, _=Depends(require_auth)):
                 raise HTTPException(status_code=400, detail="账号登录态无效，请先检测账号")
             acc.xhs_user_id = uid
             db.commit()
-        all_users = []
-        cursor = ""
-        for _ in range(100):  # 最多翻 100 页
-            ok, users, cursor, has_more, err = xhs_client.fetch_followings(acc.cookie, uid, cursor)
-            if not ok:
-                raise HTTPException(status_code=400, detail="获取关注列表失败：" + err)
-            all_users.extend(users)
-            if not has_more or not cursor:
-                break
+        ok, all_users, err = xhs_client.fetch_all_followings(acc.cookie, uid)
+        if not ok:
+            raise HTTPException(status_code=400, detail="获取关注列表失败：" + err)
         existing = {b.xhs_user_id for b in db.query(Blogger).all()}
+        blocked = {b.xhs_user_id for b in db.query(Blogger).filter(Blogger.status == "blocked").all()}
         items = []
         for u in all_users:
             uid2 = str(u.get("user_id") or "")
@@ -718,6 +721,7 @@ def list_followings(req: FollowingsListRequest, _=Depends(require_auth)):
                 "nickname": u.get("nickname") or u.get("nick_name") or uid2,
                 "url": f"https://www.xiaohongshu.com/user/profile/{uid2}",
                 "already": uid2 in existing,
+                "blocked": uid2 in blocked,
             })
         return {"items": items, "total": len(items), "account_name": acc.name or acc.nickname}
     finally:
@@ -732,12 +736,16 @@ def import_followings(req: ImportFollowingsRequest, _=Depends(require_auth)):
         m_end = _norm_hhmm(req.monitor_end)
         _check_window(m_start, m_end)
         existing = {b.xhs_user_id for b in db.query(Blogger).all()}
+        blocked = {b.xhs_user_id for b in db.query(Blogger).filter(Blogger.status == "blocked").all()}
         imported = 0
         skipped = 0
+        skipped_blocked = 0
         for it in req.items:
             uid = str(it.get("user_id") or "").strip()
             if not uid or uid in existing:
                 skipped += 1
+                if uid in blocked:
+                    skipped_blocked += 1
                 continue
             db.add(Blogger(
                 name=it.get("nickname") or uid,
@@ -753,7 +761,7 @@ def import_followings(req: ImportFollowingsRequest, _=Depends(require_auth)):
             existing.add(uid)
             imported += 1
         db.commit()
-        return {"ok": True, "imported": imported, "skipped": skipped}
+        return {"ok": True, "imported": imported, "skipped": skipped, "skipped_blocked": skipped_blocked}
     finally:
         db.close()
 
