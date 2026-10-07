@@ -515,6 +515,9 @@ def start():
     chrome = _chrome_path()
     if not chrome:
         return False, "未找到 Chrome，请先安装 Google Chrome"
+    # 关键：每次「重新打开登录页」前，清空上一次的浏览器 profile（cookie/登录态/本地存储），
+    # 否则多账号场景下会残留上一个账号的登录态，导致「每个账号进去都是同一个 cookie」。
+    _wipe_profile()
     try:
         os.makedirs(PROFILE_DIR, exist_ok=True)
     except Exception as e:  # noqa: BLE001

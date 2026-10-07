@@ -21,15 +21,15 @@ TOKEN_TTL = int(os.environ.get("XHS_ADMIN_TOKEN_TTL") or 0)
 # 调度器检查间隔（秒）：每隔这么久扫一遍是否到点
 SCHEDULER_INTERVAL = int(os.environ.get("XHS_ADMIN_SCHEDULER_INTERVAL") or 20)
 
-# 轮巡间隔下限（分钟）：每轮最多抓 MAX_PER_ROUND 个博主，间隔设太短也达不到，
-# 反而让调度器长期处于「积压」状态。统一在此收敛下限（后端校验 + 前端输入都引用）。
-MIN_INTERVAL_MINUTES = int(os.environ.get("XHS_ADMIN_MIN_INTERVAL") or 10)
-
 # 每轮最多抓取的博主数（错峰限流）。可用 XHS_ADMIN_MAX_PER_ROUND 覆盖。
 # 实测（单账号 37 博主，充分冷却后复测）：并发 1~20 全成，无风控；但并发↑单请求延迟线性上升
 # （4→3.2s、8→6.2s、16→10.8s），吞吐在 16 见顶后 20 反降。延迟最优=4，吞吐峰值=16。
 # 默认取 4（延迟/安全平衡点）；要更高吞吐可提 6~8。调度器另有「风控自适应退避」兜底。
 MAX_PER_ROUND = int(os.environ.get("XHS_ADMIN_MAX_PER_ROUND") or 4)
+
+# 账号轮询切换间隔（分钟）：每过这么久自动切换到下一个健康账号继续监控。
+# 可用 XHS_ADMIN_ACCOUNT_SWITCH_MINUTES 覆盖，也可在后台「系统设置」里改。
+ACCOUNT_SWITCH_MINUTES = int(os.environ.get("XHS_ADMIN_ACCOUNT_SWITCH_MINUTES") or 10)
 
 # 密码加盐（本机后台，固定盐即可；可用环境变量覆盖）
 SALT = os.environ.get("XHS_ADMIN_SALT") or "xhs-admin-local-2026"
@@ -37,6 +37,11 @@ SALT = os.environ.get("XHS_ADMIN_SALT") or "xhs-admin-local-2026"
 # 风控关键词：抓笔记接口命中这些字样即视为账号被风控（300011「账号异常」等）。
 # scheduler 的自适应退避、账号检测接口都引用同一份。
 RATE_LIMIT_KEYWORDS = ("账号异常", "稍后重试", "300011", "风控", "操作频繁")
+
+# 登录失效关键词：笔记探测（get_user_note_info）在 cookie 失效/过期时返回这些字样
+# （实测 web_session 过期返回「登录已过期，code -100」）。检测接口据此区分「失效」与「风控」。
+EXPIRY_KEYWORDS = ("登录已过期", "未登录", "登录态无效", "登录态失效", "登录信息",
+                   "must contain a1", "cookie 为空", "缺少 user_id")
 
 # 每次抓取拉取的最新笔记条数（增量抓取：只取最新 N 条，不再每次拉 30 条重复处理旧笔记）。
 # 可用 XHS_ADMIN_CRAWL_NUM 覆盖，也可在后台「系统设置」里改。
@@ -61,6 +66,7 @@ _TUNABLES_RANGE = {
     "first_crawl_num": (1, 30),
     "max_per_round": (1, 20),
     "push_max_age_minutes": (0, 24 * 60),  # 0 表示不限制时效
+    "account_switch_minutes": (1, 24 * 60),  # 账号轮询切换间隔
 }
 
 
@@ -70,6 +76,7 @@ def _default_tunables() -> dict:
         "first_crawl_num": FIRST_CRAWL_NUM,
         "max_per_round": MAX_PER_ROUND,
         "push_max_age_minutes": PUSH_MAX_AGE_MS // 60000,
+        "account_switch_minutes": ACCOUNT_SWITCH_MINUTES,
     }
 
 

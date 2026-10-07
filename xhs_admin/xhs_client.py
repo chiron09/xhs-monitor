@@ -10,13 +10,14 @@ import os
 import sys
 import urllib.parse
 
-from config import CRAWL_NUM, SDK_DIR
+from config import CRAWL_NUM, EXPIRY_KEYWORDS, RATE_LIMIT_KEYWORDS, SDK_DIR
 
 if SDK_DIR not in sys.path:
     sys.path.insert(0, SDK_DIR)
 
 from apis.xhs_pc_apis import XHS_Apis, splice_str  # noqa: E402
 from xhs_utils.xhs_pc import XHSPcAuth  # noqa: E402
+from xhs_utils.xhs_pc.auth import _AUTH_FACTORY_TOKEN  # noqa: E402
 
 
 def _build_api(cookie: str):
@@ -24,6 +25,45 @@ def _build_api(cookie: str):
     # 无需再显式 bootstrap —— 重复调用会让每次抓取多打一次 get_user_me（约 1~2s）。
     # 保留 fresh auth 对象（签名状态 per-request，天然线程安全），只省掉冗余网络往返。
     return XHS_Apis(XHSPcAuth.from_cookie(cookie))
+
+
+def _extract_error(msg, data) -> str:
+    """从 SDK 返回值提取真实错误文案。
+
+    SDK 在响应缺 success 字段时（风控/账号异常，如 code 300011）会抛 KeyError，
+    msg 变成无用的 "'success'"；真实错误藏在 data 里（{'code': 300011, 'msg': '账号异常...'}）。
+    """
+    err = str(msg or "")
+    if isinstance(data, dict) and (data.get("msg") or data.get("code")):
+        parts = [str(data.get("msg") or "").strip()]
+        if data.get("code"):
+            parts.append(f"code {data['code']}")
+        err = "，".join(p for p in parts if p)
+    return err
+
+
+def _auth_without_bootstrap(cookie: str, user_id: str = ""):
+    """构造 auth 但跳过 bootstrap（from_cookie 内部会打一次 get_user_me 解析 user_id）。
+
+    已知 user_id 时直接 set_user_id，省掉 bootstrap 那次 get_user_me 网络往返，
+    也让「登录失效」直接由笔记接口返回标准错误（如「登录已过期」），
+    而不是 bootstrap 抛 RuntimeError 把它变成难识别的「签名失败」。
+    依赖 SDK 私有 _AUTH_FACTORY_TOKEN（工厂令牌）绕过 from_cookie 的强制 bootstrap。
+    """
+    auth = XHSPcAuth(cookies=cookie, _factory_token=_AUTH_FACTORY_TOKEN, login_source="cookie")
+    if user_id:
+        auth.set_user_id(user_id)
+    return auth
+
+
+def classify_account_error(error: str) -> str:
+    """把检测失败的错误归类：'rate_limited' / 'expired' / 'unknown'。"""
+    e = error or ""
+    if any(k in e for k in RATE_LIMIT_KEYWORDS):
+        return "rate_limited"
+    if any(k in e for k in EXPIRY_KEYWORDS):
+        return "expired"
+    return "unknown"
 
 
 def check_cookie(cookie: str):
@@ -60,52 +100,45 @@ def extract_user_id(url: str) -> str:
 
 
 def check_crawl(cookie: str, user_id: str):
-    """探测账号抓取能力（风控检测）。返回 (ok, error)。
+    """探测账号抓取能力（风控 + 登录态一体检测）。返回 (ok, error)。
 
-    get_user_me 即使账号被风控仍返回 success，只有 get_user_note_info（user_posted）
-    会返回 300011「账号异常」。用账号自身 user_id 拉一次，命中即风控。
+    只用一次 get_user_note_info（跳过 bootstrap）：正常→ok=True；
+    风控→error 含「账号异常 300011」；登录过期/失效→error 含「登录已过期」等。
+    故检测无需再单独调 get_user_me（check_cookie）——笔记接口在 cookie 失效时同样报错。
     """
     if not user_id:
         return False, "缺少 user_id，无法探测抓取能力"
     try:
-        api = _build_api(cookie)
+        api = XHS_Apis(_auth_without_bootstrap(cookie, user_id))
         success, msg, data = api.get_user_note_info(user_id, "", "", "pc_search", num=1)
         if not success:
-            err = str(msg or "")
-            # SDK 在响应缺 success 字段时抛 KeyError，真实错误在 data 里
-            if isinstance(data, dict) and (data.get("msg") or data.get("code")):
-                parts = [str(data.get("msg") or "").strip()]
-                if data.get("code"):
-                    parts.append(f"code {data['code']}")
-                err = "，".join(p for p in parts if p)
-            return False, err
+            return False, _extract_error(msg, data)
         return True, ""
     except Exception as e:  # noqa: BLE001
-        return False, str(e)
+        return False, _extract_error(str(e), None)
 
 
-def fetch_notes_page(cookie: str, url: str, num: int = CRAWL_NUM):
-    """抓博主最新一页笔记（默认只取最新 CRAWL_NUM 条，增量抓取）。返回 (ok, notes_list, nickname, error)。"""
+def fetch_notes_page(cookie: str, url: str, num: int = CRAWL_NUM, account_user_id: str = ""):
+    """抓博主最新一页笔记（默认只取最新 CRAWL_NUM 条，增量抓取）。返回 (ok, notes_list, nickname, error)。
+
+    account_user_id：登录账号的 user_id（用于签名）。传入时跳过 bootstrap，
+    省掉一次 get_user_me（约 1.5~2s）；留空则走 _build_api 自动 bootstrap（兼容旧调用/测试脚本）。
+    """
     uid = extract_user_id(url)
     if not uid:
         return False, [], "", "无法从链接解析 user_id（应为 24 位十六进制）"
     try:
-        api = _build_api(cookie)
+        if account_user_id:
+            api = XHS_Apis(_auth_without_bootstrap(cookie, account_user_id))
+        else:
+            api = _build_api(cookie)
         parsed = urllib.parse.urlparse(url.strip())
         q = urllib.parse.parse_qs(parsed.query)
         xsec_token = q.get("xsec_token", [""])[0]
         xsec_source = q.get("xsec_source", ["pc_search"])[0]
         success, msg, data = api.get_user_note_info(uid, "", xsec_token, xsec_source, num=num)
         if not success:
-            err = str(msg or "")
-            # SDK 在响应缺 'success' 字段时（风控/账号异常，如 code 300011）会抛 KeyError，
-            # msg 变成无用的 "'success'"；真实错误藏在 data 里（{'code': 300011, 'msg': '账号异常...'}）。
-            if isinstance(data, dict) and (data.get("msg") or data.get("code")):
-                parts = [str(data.get("msg") or "").strip()]
-                if data.get("code"):
-                    parts.append(f"code {data['code']}")
-                err = "，".join(p for p in parts if p)
-            return False, [], "", err
+            return False, [], "", _extract_error(msg, data)
         notes = []
         if isinstance(data, dict):
             notes = (data.get("data") or {}).get("notes") or []

@@ -352,8 +352,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
                 <template #default="{row}"><el-tag :type="statusType(row.status)">{{statusText(row.status)}}</el-tag></template>
               </el-table-column>
               <el-table-column prop="last_checked_at" label="最近检测" min-width="150"></el-table-column>
-              <el-table-column label="操作" width="215">
+              <el-table-column label="操作" width="265">
                 <template #default="{row}">
+                  <el-button size="small" link type="primary" @click="openEdit(row)"><el-icon><edit></edit></el-icon>编辑</el-button>
                   <el-button size="small" link type="warning" @click="openUpdateCookie(row)"><el-icon><refresh></refresh></el-icon>更新</el-button>
                   <el-button size="small" link type="primary" @click="checkAccount(row)"><el-icon><search></search></el-icon>检测</el-button>
                   <el-button size="small" link type="danger" @click="deleteAccount(row)"><el-icon><delete></delete></el-icon>删除</el-button>
@@ -381,12 +382,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
               <el-table-column prop="name" label="博主名" min-width="110"></el-table-column>
               <el-table-column label="主页链接" min-width="220" show-overflow-tooltip>
                 <template #default="{row}"><span style="font-size:12px;color:#606266">{{row.url}}</span></template>
-              </el-table-column>
-              <el-table-column prop="account_name" label="监控账号" min-width="100">
-                <template #default="{row}">{{row.account_name||'未指定'}}</template>
-              </el-table-column>
-              <el-table-column label="轮巡间隔" width="90">
-                <template #default="{row}">{{row.interval_minutes}} 分钟</template>
               </el-table-column>
               <el-table-column label="监控时段" width="130">
                 <template #default="{row}">
@@ -484,6 +479,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
                   <el-input-number v-model="tunables.push_max_age_minutes" :min="0" :max="1440"></el-input-number>
                   <div class="tunable-hint">分钟，0=不限；发布时间超过则不推送</div>
                 </div>
+                <div>
+                  <div class="tunable-label">账号切换间隔</div>
+                  <el-input-number v-model="tunables.account_switch_minutes" :min="1" :max="1440"></el-input-number>
+                  <div class="tunable-hint">分钟；每过这么久切换到下一个健康账号</div>
+                </div>
               </div>
               <div class="tunable-actions">
                 <el-button type="primary" :loading="savingTunables" @click="saveTunables">保存参数</el-button>
@@ -533,16 +533,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
   <el-dialog v-model="accountDialogVisible" :title="cookieUpdateId ? '更新账号登录态' : '添加小红书账号'" width="560px"
              :class="{ 'wide-login': accountTab === 'browser' }" @close="resetAccountDialog">
     <el-tabs v-model="accountTab">
-      <el-tab-pane label="Cookie 导入" name="cookie">
-        <el-alert v-if="cookieUpdateId" type="info" :closable="false" show-icon style="margin-bottom:14px">
-          <template #title>正在更新已有账号的登录态</template>
-          <div style="font-size:12px;line-height:1.7">粘贴新的 Cookie 后点保存，校验通过即替换原账号登录态；校验不通过则保持原值不变。</div>
-        </el-alert>
+      <el-tab-pane v-if="!cookieUpdateId" label="Cookie 导入" name="cookie">
         <el-form label-width="80px">
-          <el-form-item v-if="!cookieUpdateId" label="账号名"><el-input v-model="accountForm.name" placeholder="可选，留空自动用昵称"></el-input></el-form-item>
+          <el-form-item label="账号名"><el-input v-model="accountForm.name" placeholder="可选，留空自动用昵称"></el-input></el-form-item>
           <el-form-item label="Cookie"><el-input v-model="accountForm.cookie" type="textarea" :rows="7" placeholder="浏览器登录后完整复制 Cookie 粘贴到这里"></el-input></el-form-item>
         </el-form>
-        <el-button type="danger" style="width:100%" :loading="saving" @click="saveAccount">{{ cookieUpdateId ? '保存并更新登录态' : '保存并检测' }}</el-button>
+        <el-button type="danger" style="width:100%" :loading="saving" @click="saveAccount">保存并检测</el-button>
       </el-tab-pane>
 
       <el-tab-pane label="浏览器登录" name="browser">
@@ -551,7 +547,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
             <template #title>推荐方式（最可靠）</template>
             <div style="font-size:12px;line-height:1.7">
               登录页直接嵌在下方页面内（服务端无头浏览器渲染），你在画面里扫码或用手机验证码登录，完成后点「完成登录」按钮读取登录态。
-              <div v-if="cookieUpdateId" style="color:#e6a23c;margin-top:4px">当前为更新模式：登录哪个小红书号，就刷新哪个已有账号的登录态；若登录了其他新账号则会新加一条。</div>
+              <div v-if="cookieUpdateId" style="color:#e6a23c;margin-top:4px">当前为更新模式：登录完成后，将用新登录的账号更新「{{accountForm.name}}」的登录态</div>
             </div>
           </el-alert>
           <div style="text-align:center;padding:4px 0 10px">
@@ -583,6 +579,27 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
     </el-tabs>
   </el-dialog>
 
+  <!-- 编辑账号弹窗 -->
+  <el-dialog v-model="editDialogVisible" title="编辑账号" width="520px">
+    <el-form label-width="80px">
+      <el-form-item label="账号名"><el-input v-model="editForm.name"></el-input></el-form-item>
+      <el-form-item label="状态">
+        <el-select v-model="editForm.status" style="width:100%">
+          <el-option label="有效" value="active"></el-option>
+          <el-option label="已暂停" value="paused"></el-option>
+          <el-option label="已失效" value="expired"></el-option>
+        </el-select>
+      </el-form-item>
+      <el-form-item label="Cookie">
+        <el-input v-model="editForm.cookie" type="textarea" :rows="5" placeholder="留空则不修改 Cookie；填写则校验通过后替换"></el-input>
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="editDialogVisible=false">取消</el-button>
+      <el-button type="primary" :loading="saving" @click="saveEdit">保存</el-button>
+    </template>
+  </el-dialog>
+
   <!-- 二维码特写（浏览器登录画面里的二维码放大图） -->
   <el-dialog v-model="qrCloseupVisible" title="扫码登录 — 二维码特写" width="520px" align-center
              append-to-body>
@@ -601,16 +618,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
       <el-form-item v-if="bloggerEditId" label="博主名"><el-input v-model="bloggerForm.name"></el-input></el-form-item>
       <div v-else style="font-size:12px;color:#8a919f;margin-bottom:16px">博主名将在保存后自动获取</div>
       <el-form-item label="主页链接"><el-input v-model="bloggerForm.url" placeholder="https://www.xiaohongshu.com/user/profile/xxx"></el-input></el-form-item>
-      <el-form-item label="监控账号">
-        <el-select v-model="bloggerForm.account_id" placeholder="未指定（用哪个账号抓取）" clearable style="width:100%">
-          <el-option v-for="a in accounts" :key="a.id" :label="a.name" :value="a.id"></el-option>
-        </el-select>
-      </el-form-item>
-      <el-form-item label="轮巡间隔">
-        <el-input-number v-model="bloggerForm.interval_minutes" :min="10" :max="10080"></el-input-number>
-        <span style="margin-left:10px;font-size:12px;color:#8a919f">分钟</span>
-        <div style="width:100%;font-size:12px;color:#a3a9b5;line-height:1.5;margin-top:4px">最短 10 分钟；调度器每轮限量并发抓取，间隔过短也会被排队；账号触发风控会自动暂停 30 分钟</div>
-      </el-form-item>
       <el-form-item label="监控时段">
         <div class="time-range">
           <el-switch v-model="bloggerForm.windowOn"></el-switch>
@@ -644,11 +651,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
       </el-select>
       <el-button type="danger" :loading="followLoading" @click="fetchFollowings">获取关注列表</el-button>
       <div style="display:flex;align-items:center;gap:8px">
-        <span style="font-size:13px;color:#606266">轮巡间隔</span>
-        <el-input-number v-model="followImportInterval" :min="10" :max="10080"></el-input-number>
-        <span style="font-size:13px;color:#8a919f">分钟</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:8px">
         <span style="font-size:13px;color:#606266">监控时段</span>
         <el-switch v-model="followImportWindowOn"></el-switch>
         <span v-if="followImportWindowOn" class="time-range-inputs">
@@ -677,15 +679,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
   <!-- 批量修改弹窗 -->
   <el-dialog v-model="batchDialogVisible" title="批量修改" width="460px">
     <el-form label-width="100px">
-      <el-form-item label="监控账号">
-        <el-select v-model="batchForm.account_id" placeholder="未指定（留空则清空）" clearable style="width:100%">
-          <el-option v-for="a in accounts" :key="a.id" :label="a.name" :value="a.id"></el-option>
-        </el-select>
-      </el-form-item>
-      <el-form-item label="轮巡间隔">
-        <el-input-number v-model="batchForm.interval_minutes" :min="10" :max="10080"></el-input-number>
-        <span style="margin-left:10px;font-size:12px;color:#8a919f">分钟</span>
-      </el-form-item>
       <el-form-item label="监控时段">
         <el-radio-group v-model="batchForm.windowMode" size="small">
           <el-radio-button label="keep">不修改</el-radio-button>
@@ -731,6 +724,9 @@ const app = Vue.createApp({
       accountTab: 'cookie',
       cookieUpdateId: null,
       accountForm: { name: '', cookie: '' },
+      editDialogVisible: false,
+      editId: null,
+      editForm: { name: '', status: 'active', cookie: '' },
       browserLoading: false,
       browserChecking: false,
       browserRunning: false,
@@ -750,19 +746,18 @@ const app = Vue.createApp({
       bloggers: [],
       bloggerDialogVisible: false,
       bloggerEditId: null,
-      bloggerForm: { name: '', url: '', account_id: null, interval_minutes: 60, windowOn: false, monitor_start: '', monitor_end: '' },
+      bloggerForm: { name: '', url: '', windowOn: false, monitor_start: '', monitor_end: '' },
       followImportVisible: false,
       followImportAccountId: null,
       followItems: [],
       followSelection: [],
       followLoading: false,
-      followImportInterval: 60,
       followImportWindowOn: false,
       followImportStart: '',
       followImportEnd: '',
       bloggerSelection: [],
       batchDialogVisible: false,
-      batchForm: { account_id: null, interval_minutes: 60, windowMode: 'keep', monitor_start: '', monitor_end: '' },
+      batchForm: { windowMode: 'keep', monitor_start: '', monitor_end: '' },
       // 笔记
       notes: [],
       notesTotal: 0,
@@ -789,7 +784,7 @@ const app = Vue.createApp({
         }
       },
       // 监控可调参数（后台设置页，落库 Setting 表，改后立即生效）
-      tunables: { crawl_num: 5, first_crawl_num: 1, max_per_round: 4, push_max_age_minutes: 30 },
+      tunables: { crawl_num: 5, first_crawl_num: 1, max_per_round: 4, push_max_age_minutes: 30, account_switch_minutes: 10 },
       savingTunables: false,
     };
   },
@@ -871,7 +866,7 @@ const app = Vue.createApp({
     openUpdateCookie(row) {
       this.cookieUpdateId = row.id;
       this.accountForm = { name: row.name, cookie: '' };
-      this.accountTab = 'cookie';
+      this.accountTab = 'browser';  // 更新只走浏览器登录
       this.accountDialogVisible = true;
       this.refreshBrowserState();
     },
@@ -918,9 +913,15 @@ const app = Vue.createApp({
       const ctrl = new AbortController();
       const killer = setTimeout(() => ctrl.abort(), 150000); // 2.5 分钟还没结果就中断
       try {
-        // 更新模式下传账号名，便于按名字匹配更新而非误新建
-        const name = this.cookieUpdateId ? (this.accountForm.name || '') : '';
-        const r = await this.api('/api/accounts/browser/check' + (name ? '?name=' + encodeURIComponent(name) : ''), 'POST', null, 160000, ctrl.signal);
+        // 更新模式传 account_id（强制更新目标账号），避免多账号下按名字/uid 匹配错账号；
+        // 添加模式才按名字匹配（可选）
+        const params = [];
+        if (this.cookieUpdateId) {
+          params.push('account_id=' + this.cookieUpdateId);
+        } else if (this.accountForm.name) {
+          params.push('name=' + encodeURIComponent(this.accountForm.name));
+        }
+        const r = await this.api('/api/accounts/browser/check' + (params.length ? '?' + params.join('&') : ''), 'POST', null, 160000, ctrl.signal);
         if (r.logged_in && r.account) {
           this.stopFrameStream();
           this.browserStatusColor = '#67c23a';
@@ -1057,15 +1058,25 @@ const app = Vue.createApp({
       if (!this.accountForm.cookie.trim()) { ElMessage.warning('请粘贴 Cookie'); return; }
       this.saving = true;
       try {
-        if (this.cookieUpdateId) {
-          const d = await this.api('/api/accounts/' + this.cookieUpdateId, 'PUT', { cookie: this.accountForm.cookie });
-          if (d.ok) { this.accountDialogVisible = false; this.accountForm = { name:'', cookie:'' }; ElMessage.success('登录态已更新：' + d.item.nickname); this.loadAccounts(); }
-          else ElMessage.error('Cookie 无效，未更新：' + (d.error || ''));
-        } else {
-          const d = await this.api('/api/accounts', 'POST', this.accountForm);
-          if (d.ok) { this.accountDialogVisible = false; this.accountForm = { name:'', cookie:'' }; ElMessage.success('账号添加成功：' + d.item.nickname); this.loadAccounts(); }
-          else ElMessage.error('登录态无效：' + (d.error || ''));
-        }
+        const d = await this.api('/api/accounts', 'POST', this.accountForm);
+        if (d.ok) { this.accountDialogVisible = false; this.accountForm = { name:'', cookie:'' }; ElMessage.success('账号添加成功：' + d.item.nickname); this.loadAccounts(); }
+        else ElMessage.error('登录态无效：' + (d.error || ''));
+      } finally { this.saving = false; }
+    },
+    openEdit(row) {
+      this.editId = row.id;
+      this.editForm = { name: row.name, status: row.status, cookie: '' };
+      this.editDialogVisible = true;
+    },
+    async saveEdit() {
+      if (!this.editForm.name.trim()) { ElMessage.warning('账号名不能为空'); return; }
+      this.saving = true;
+      try {
+        const payload = { name: this.editForm.name.trim(), status: this.editForm.status };
+        if (this.editForm.cookie.trim()) payload.cookie = this.editForm.cookie.trim();
+        const d = await this.api('/api/accounts/' + this.editId, 'PUT', payload);
+        if (d.ok) { this.editDialogVisible = false; ElMessage.success('已保存'); this.loadAccounts(); }
+        else ElMessage.error('保存失败：' + (d.error || ''));
       } finally { this.saving = false; }
     },
     async checkAccount(row) {
@@ -1095,12 +1106,11 @@ const app = Vue.createApp({
       if (row) {
         const s = row.monitor_start || '', e = row.monitor_end || '';
         this.bloggerForm = {
-          name: row.name, url: row.url, account_id: row.account_id,
-          interval_minutes: row.interval_minutes,
+          name: row.name, url: row.url,
           windowOn: !!(s || e), monitor_start: s, monitor_end: e,
         };
       } else {
-        this.bloggerForm = { name: '', url: '', account_id: null, interval_minutes: 60, windowOn: false, monitor_start: '', monitor_end: '' };
+        this.bloggerForm = { name: '', url: '', windowOn: false, monitor_start: '', monitor_end: '' };
       }
       this.bloggerDialogVisible = true;
     },
@@ -1113,7 +1123,7 @@ const app = Vue.createApp({
       }
       this.saving = true;
       const body = {
-        name: f.name, url: f.url, account_id: f.account_id, interval_minutes: f.interval_minutes,
+        name: f.name, url: f.url,
         monitor_start: f.windowOn ? (f.monitor_start || '') : '',
         monitor_end: f.windowOn ? (f.monitor_end || '') : '',
       };
@@ -1147,7 +1157,6 @@ const app = Vue.createApp({
     openFollowImport() {
       this.followImportVisible = true;
       this.followItems = []; this.followSelection = []; this.followImportAccountId = null;
-      this.followImportInterval = 60;
       this.followImportWindowOn = false; this.followImportStart = ''; this.followImportEnd = '';
     },
     async fetchFollowings() {
@@ -1171,7 +1180,6 @@ const app = Vue.createApp({
       }
       const d = await this.api('/api/bloggers/import-followings', 'POST', {
         account_id: this.followImportAccountId, items: this.followSelection,
-        interval_minutes: this.followImportInterval,
         monitor_start: this.followImportWindowOn ? (this.followImportStart || '') : '',
         monitor_end: this.followImportWindowOn ? (this.followImportEnd || '') : '',
       });
@@ -1182,7 +1190,7 @@ const app = Vue.createApp({
     onBloggerSelectionChange(rows) { this.bloggerSelection = rows; },
     openBatchDialog() {
       if (!this.bloggerSelection.length) { ElMessage.warning('请先勾选博主'); return; }
-      this.batchForm = { account_id: null, interval_minutes: 60, windowMode: 'keep', monitor_start: '', monitor_end: '' };
+      this.batchForm = { windowMode: 'keep', monitor_start: '', monitor_end: '' };
       this.batchDialogVisible = true;
     },
     async saveBatch() {
@@ -1193,7 +1201,6 @@ const app = Vue.createApp({
       }
       const body = {
         ids: this.bloggerSelection.map(b => b.id),
-        interval_minutes: f.interval_minutes,
         clear_window: f.windowMode === 'clear',
       };
       if (f.windowMode === 'set') {

@@ -20,7 +20,7 @@ import covers
 import notifier
 import scheduler
 import xhs_client
-from config import DEFAULT_PASSWORD, MIN_INTERVAL_MINUTES, RATE_LIMIT_KEYWORDS, STATIC_DIR, TOKEN_TTL, get_tunables, hash_password, save_tunables
+from config import DEFAULT_PASSWORD, RATE_LIMIT_KEYWORDS, STATIC_DIR, TOKEN_TTL, get_tunables, hash_password, save_tunables
 from db import Account, AuthToken, Blogger, Note, SessionLocal, Setting
 
 # ---- 登录 token（持久化到 auth_tokens 表，重启后台不掉登录） ----
@@ -129,15 +129,16 @@ class AccountCreate(BaseModel):
     cookie: str = ""
 
 
-class CookieUpdate(BaseModel):
-    cookie: str = ""
+class AccountUpdate(BaseModel):
+    """编辑账号：名称/状态/Cookie 均为可选，未传的字段保持不变。"""
+    name: str | None = None
+    status: str | None = None
+    cookie: str | None = None
 
 
 class BloggerCreate(BaseModel):
     name: str = ""
     url: str = Field(min_length=1)
-    account_id: int | None = None
-    interval_minutes: int = Field(default=60, ge=MIN_INTERVAL_MINUTES, le=10080)
     monitor_start: str = ""
     monitor_end: str = ""
 
@@ -145,8 +146,6 @@ class BloggerCreate(BaseModel):
 class BloggerUpdate(BaseModel):
     name: str | None = None
     url: str | None = None
-    account_id: int | None = None
-    interval_minutes: int | None = Field(default=None, ge=MIN_INTERVAL_MINUTES, le=10080)
     monitor_start: str | None = None
     monitor_end: str | None = None
     status: str | None = None
@@ -167,15 +166,12 @@ class FollowingsListRequest(BaseModel):
 class ImportFollowingsRequest(BaseModel):
     account_id: int
     items: list[dict]
-    interval_minutes: int = Field(default=60, ge=MIN_INTERVAL_MINUTES, le=10080)
     monitor_start: str = ""
     monitor_end: str = ""
 
 
 class BatchUpdateRequest(BaseModel):
     ids: list[int]
-    account_id: int | None = None
-    interval_minutes: int = Field(default=60, ge=MIN_INTERVAL_MINUTES, le=10080)
     # 只更新显式传入的字段：批量弹窗里没填的项保持原值不动
     monitor_start: str | None = None
     monitor_end: str | None = None
@@ -373,22 +369,57 @@ def create_account(req: AccountCreate, _=Depends(require_auth)):
     return _persist_account(req.cookie, req.name)
 
 
+def _update_account_by_id(account_id: int, cookie: str) -> dict:
+    """更新指定账号的 Cookie：校验通过才替换，失败不动原值。
+
+    与 _persist_account（按 uid/name 自动匹配）不同，这里**强制更新指定 id 的账号**，
+    供「更新登录态」场景使用，避免多账号下按名字/uid 匹配错账号。
+    """
+    db = SessionLocal()
+    try:
+        acc = db.get(Account, account_id)
+        if not acc:
+            return {"ok": False, "error": "账号不存在", "item": None}
+        ok, nickname, uid, err = xhs_client.check_cookie(cookie)
+        if not ok:
+            return {"ok": False, "error": err or "Cookie 校验未通过，未更新原登录态", "item": None}
+        acc.cookie = cookie
+        acc.nickname = nickname or acc.nickname
+        acc.xhs_user_id = uid or acc.xhs_user_id
+        acc.status = "active"
+        acc.last_checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        db.commit()
+        db.refresh(acc)
+        return {"ok": True, "error": "", "item": acc.to_dict(), "updated": True}
+    finally:
+        db.close()
+
+
 @app.put("/api/accounts/{account_id}")
-def update_account_cookie(account_id: int, req: CookieUpdate, _=Depends(require_auth)):
-    """更新已有账号的 Cookie：校验通过才替换，失败不动原值。"""
+def update_account(account_id: int, req: AccountUpdate, _=Depends(require_auth)):
+    """编辑账号：名称 / 状态 / Cookie 均可选修改。
+
+    Cookie 填了则校验，校验通过才替换（失败不动原值）；校验通过时顺带刷新
+    nickname/xhs_user_id 并把状态置为 active。
+    """
     db = SessionLocal()
     try:
         acc = db.get(Account, account_id)
         if not acc:
             raise HTTPException(status_code=404, detail="账号不存在")
-        ok, nickname, uid, err = xhs_client.check_cookie(req.cookie)
-        if not ok:
-            return {"ok": False, "error": err or "Cookie 校验未通过，未更新原登录态"}
-        acc.cookie = req.cookie
-        acc.nickname = nickname or acc.nickname
-        acc.xhs_user_id = uid or acc.xhs_user_id
-        acc.status = "active"
-        acc.last_checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if req.name is not None:
+            acc.name = req.name.strip()
+        if req.status is not None:
+            acc.status = req.status
+        if req.cookie is not None and req.cookie.strip():
+            ok, nickname, uid, err = xhs_client.check_cookie(req.cookie)
+            if not ok:
+                return {"ok": False, "error": err or "Cookie 校验未通过，未更新"}
+            acc.cookie = req.cookie
+            acc.nickname = nickname or acc.nickname
+            acc.xhs_user_id = uid or acc.xhs_user_id
+            acc.status = "active"
+            acc.last_checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         db.commit()
         db.refresh(acc)
         return {"ok": True, "item": acc.to_dict()}
@@ -435,12 +466,16 @@ def browser_login_status(_=Depends(require_auth)):
 
 
 @app.post("/api/accounts/browser/check")
-def browser_login_check(name: str = "", _=Depends(require_auth)):
+def browser_login_check(name: str = "", account_id: int = 0, _=Depends(require_auth)):
     # 手动触发登录态校验（同步，前端用 loading 覆盖 5-10 秒）
+    # account_id > 0 表示「更新指定账号」：强制更新该账号，避免多账号下按 uid/name 匹配错账号。
     result = browser_login.check()
     if result.get("logged_in") and result.get("cookie") and not result.get("account"):
         cookie = result.pop("cookie")
-        saved = _persist_account(cookie, name)
+        if account_id:
+            saved = _update_account_by_id(account_id, cookie)
+        else:
+            saved = _persist_account(cookie, name)
         if saved.get("ok") and saved.get("item"):
             browser_login.set_account(saved["item"])
             result["account"] = saved["item"]
@@ -470,7 +505,6 @@ def browser_login_stop(_=Depends(require_auth)):
 def delete_account(account_id: int, _=Depends(require_auth)):
     db = SessionLocal()
     try:
-        db.execute(sa_update(Blogger).where(Blogger.account_id == account_id).values(account_id=None))
         acc = db.get(Account, account_id)
         if acc:
             db.delete(acc)
@@ -487,25 +521,44 @@ def check_account(account_id: int, _=Depends(require_auth)):
         acc = db.get(Account, account_id)
         if not acc:
             raise HTTPException(status_code=404, detail="账号不存在")
-        ok, nickname, uid, err = xhs_client.check_cookie(acc.cookie)
         rate_limited = False
         rate_limit_msg = ""
-        if ok:
+        err = ""
+        probe_uid = acc.xhs_user_id
+        if not probe_uid:
+            # 无已存 uid（账号从未检测过）：先拿 uid（顺带验登录态）
+            c_ok, nickname, uid, c_err = xhs_client.check_cookie(acc.cookie)
+            if not c_ok:
+                acc.status = "expired"
+                acc.last_checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                db.commit()
+                return {"ok": False, "error": c_err or "登录态无效",
+                        "rate_limited": False, "rate_limit_msg": "",
+                        "item": acc.to_dict()}
             acc.nickname = nickname or acc.nickname
             acc.xhs_user_id = uid or acc.xhs_user_id
-            # 风控探测：get_user_me 被风控也返回成功，只有抓笔记接口会报 300011
-            probe_uid = uid or acc.xhs_user_id
-            if probe_uid:
-                c_ok, c_err = xhs_client.check_crawl(acc.cookie, probe_uid)
-                if not c_ok and any(k in (c_err or "") for k in RATE_LIMIT_KEYWORDS):
-                    rate_limited = True
-                    rate_limit_msg = c_err
-        if not ok:
-            acc.status = "expired"
-        elif rate_limited:
-            acc.status = "rate_limited"
-        else:
+            probe_uid = uid
+
+        # 一次笔记探测：同时区分 正常 / 风控 / 失效（cookie 失效时笔记接口同样报「登录已过期」）
+        d_ok, d_err = xhs_client.check_crawl(acc.cookie, probe_uid)
+        if d_ok:
             acc.status = "active"
+            ok = True
+        else:
+            kind = xhs_client.classify_account_error(d_err)
+            if kind == "rate_limited":
+                acc.status = "rate_limited"
+                ok = True  # 登录态没问题，只是被风控
+                rate_limited = True
+                rate_limit_msg = d_err
+            elif kind == "expired":
+                acc.status = "expired"
+                ok = False
+                err = d_err
+            else:
+                # unknown（网络抖动等）：保守不改变状态
+                ok = False
+                err = "检测失败：" + (d_err or "未知错误")
         acc.last_checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         db.commit()
         return {
@@ -524,12 +577,7 @@ def check_account(account_id: int, _=Depends(require_auth)):
 def list_bloggers(_=Depends(require_auth)):
     db = SessionLocal()
     try:
-        items = []
-        for b in db.query(Blogger).order_by(Blogger.id.asc()).all():
-            d = b.to_dict()
-            acc = db.get(Account, b.account_id) if b.account_id else None
-            d["account_name"] = acc.name if acc else ""
-            items.append(d)
+        items = [b.to_dict() for b in db.query(Blogger).order_by(Blogger.id.asc()).all()]
         return {"items": items}
     finally:
         db.close()
@@ -549,8 +597,6 @@ def create_blogger(req: BloggerCreate, _=Depends(require_auth)):
             name=req.name or uid,
             url=req.url.strip(),
             xhs_user_id=uid,
-            account_id=req.account_id,
-            interval_minutes=req.interval_minutes,
             monitor_start=m_start,
             monitor_end=m_end,
             status="active",
@@ -589,10 +635,6 @@ def update_blogger(blogger_id: int, req: BloggerUpdate, _=Depends(require_auth))
                 raise HTTPException(status_code=400, detail="链接无效：无法解析 user_id")
             b.url = req.url.strip()
             b.xhs_user_id = uid
-        if req.account_id is not None:
-            b.account_id = req.account_id
-        if req.interval_minutes is not None:
-            b.interval_minutes = req.interval_minutes
         if req.monitor_start is not None or req.monitor_end is not None:
             m_start = _norm_hhmm(req.monitor_start if req.monitor_start is not None else b.monitor_start)
             m_end = _norm_hhmm(req.monitor_end if req.monitor_end is not None else b.monitor_end)
@@ -701,8 +743,6 @@ def import_followings(req: ImportFollowingsRequest, _=Depends(require_auth)):
                 name=it.get("nickname") or uid,
                 url=it.get("url") or f"https://www.xiaohongshu.com/user/profile/{uid}",
                 xhs_user_id=uid,
-                account_id=req.account_id,
-                interval_minutes=req.interval_minutes or 60,
                 monitor_start=m_start,
                 monitor_end=m_end,
                 status="active",
@@ -724,7 +764,7 @@ def batch_update_bloggers(req: BatchUpdateRequest, _=Depends(require_auth)):
     try:
         if not req.ids:
             raise HTTPException(status_code=400, detail="未选择博主")
-        values = {"interval_minutes": req.interval_minutes}
+        values = {}
         if req.clear_window:
             values["monitor_start"] = ""
             values["monitor_end"] = ""
@@ -734,9 +774,8 @@ def batch_update_bloggers(req: BatchUpdateRequest, _=Depends(require_auth)):
             _check_window(m_start, m_end)
             values["monitor_start"] = m_start
             values["monitor_end"] = m_end
-        # account_id 显式传 null 时才清空账号
-        if "account_id" in req.model_fields_set:
-            values["account_id"] = req.account_id
+        if not values:
+            return {"ok": True, "updated": 0}
         result = db.execute(
             sa_update(Blogger).where(Blogger.id.in_(req.ids)).values(**values)
         )

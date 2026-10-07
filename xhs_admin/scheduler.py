@@ -11,14 +11,13 @@ from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 
 import notifier
-from config import DATA_DIR, MAX_PER_ROUND, MIN_INTERVAL_MINUTES, PUSH_MAX_AGE_MS, RATE_LIMIT_KEYWORDS, get_tunables
+from config import DATA_DIR, EXPIRY_KEYWORDS, MAX_PER_ROUND, PUSH_MAX_AGE_MS, RATE_LIMIT_KEYWORDS, get_tunables
 from db import Account, Blogger, Note, SessionLocal, Setting
-from xhs_client import fetch_notes_page, is_pinned, normalize_note
+from xhs_client import check_crawl, classify_account_error, fetch_notes_page, is_pinned, normalize_note
 
 # 账号异常告警：登录过期这类「持续状态」默认 6 小时内最多提醒一次；
 # 风控是「冷却后重试」的周期事件，用冷却周期(30分钟)作去重窗口，让每次新风控都告警。
 _ACCOUNT_ALERT_INTERVAL = 6 * 3600
-_EXPIRY_KEYWORDS = ("登录已过期", "未登录", "登录态无效", "登录态失效", "登录信息")
 _ACCOUNT_COOLDOWN_SECONDS = 30 * 60  # 风控后暂停该账号 30 分钟
 
 # 推送补偿：失败笔记最多重试次数、重试冷却（秒）
@@ -26,6 +25,10 @@ _PUSH_MAX_ATTEMPTS = 5
 _PUSH_RETRY_COOLDOWN = 300
 
 _LOG = logging.getLogger("xhs_monitor.scheduler")
+
+# 告警去重的进程内锁：多个博主并发抓取同时触发风控时，串行化「读去重→判断→写去重」，
+# 避免并发线程同时读到旧去重时间戳、导致同一风控事件重复推送多条告警。
+_ALERT_LOCK = threading.Lock()
 
 
 def _setup_logging() -> None:
@@ -60,20 +63,22 @@ def _notify_account_alert(db, account, blogger_name: str, title: str, content: s
     返回 True 表示这是一次「新的告警事件」（去重通过、已尝试推送）；
     False 表示被去重窗口跳过（不算新事件）。推送成败写入日志。
     """
-    now = time.time()
-    s = db.get(Setting, dedup_key)
-    try:
-        data = json.loads(s.value) if s and s.value else {}
-    except Exception:  # noqa: BLE001
-        data = {}
-    if now - float(data.get(str(account.id), 0) or 0) < dedup_interval:
-        return False
-    data[str(account.id)] = now
-    if s:
-        s.value = json.dumps(data)
-    else:
-        db.add(Setting(key=dedup_key, value=json.dumps(data)))
-    db.commit()
+    # 去重判断 + 写时间戳：加锁串行化，避免并发重复推送（推送本身放锁外，避免阻塞网络请求）
+    with _ALERT_LOCK:
+        now = time.time()
+        s = db.get(Setting, dedup_key)
+        try:
+            data = json.loads(s.value) if s and s.value else {}
+        except Exception:  # noqa: BLE001
+            data = {}
+        if now - float(data.get(str(account.id), 0) or 0) < dedup_interval:
+            return False
+        data[str(account.id)] = now
+        if s:
+            s.value = json.dumps(data)
+        else:
+            db.add(Setting(key=dedup_key, value=json.dumps(data)))
+        db.commit()
     try:
         result = notifier.notify_custom(notifier.get_config(db), title, content)
     except Exception as e:  # noqa: BLE001
@@ -307,18 +312,162 @@ def in_monitor_window(blogger, now: datetime | None = None) -> bool:
     return cur >= start or cur <= end
 
 
-def _effective_interval_minutes(b: Blogger) -> int:
-    """有效轮巡间隔 = max(下限, 配置值) × 2^连续失败（封顶 8 倍，即失败退避）。"""
-    base = max(MIN_INTERVAL_MINUTES, b.interval_minutes or MIN_INTERVAL_MINUTES)
-    fails = min(b.fail_count or 0, 3)
-    return base * (1 << fails)
-
-
-def _is_due(b: Blogger, now_ms: int) -> bool:
-    """是否到期：从未抓过 → 到期；否则距上次「尝试」超过有效间隔。"""
+def _is_due(b: Blogger, now_ms: int, switch_minutes: int) -> bool:
+    """是否到期：从未抓过 → 到期；否则距上次「尝试」超过账号切换间隔（含失败退避 2^n）。"""
     if not b.last_attempt_at:
         return True
-    return (now_ms - b.last_attempt_at) >= _effective_interval_minutes(b) * 60 * 1000
+    fails = min(b.fail_count or 0, 3)
+    interval_ms = switch_minutes * 60 * 1000 * (1 << fails)
+    return (now_ms - b.last_attempt_at) >= interval_ms
+
+
+# ---------- 账号轮询 ----------
+
+_ACCOUNT_CURRENT_KEY = "current_account_id"
+_ACCOUNT_SWITCHED_AT_KEY = "account_switched_at"
+
+
+def _get_current_account_id(db) -> int:
+    s = db.get(Setting, _ACCOUNT_CURRENT_KEY)
+    try:
+        return int(s.value) if s and s.value else 0
+    except (ValueError, TypeError):
+        return 0
+
+
+def _get_switched_at(db) -> float:
+    s = db.get(Setting, _ACCOUNT_SWITCHED_AT_KEY)
+    try:
+        return float(s.value) if s and s.value else 0.0
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _set_current_account(db, account_id: int) -> None:
+    """记录当前轮询账号 + 切换时间戳（落库，重启不丢）。"""
+    s = db.get(Setting, _ACCOUNT_CURRENT_KEY)
+    if s:
+        s.value = str(account_id)
+    else:
+        db.add(Setting(key=_ACCOUNT_CURRENT_KEY, value=str(account_id)))
+    s2 = db.get(Setting, _ACCOUNT_SWITCHED_AT_KEY)
+    if s2:
+        s2.value = str(time.time())
+    else:
+        db.add(Setting(key=_ACCOUNT_SWITCHED_AT_KEY, value=str(time.time())))
+    db.commit()
+
+
+def _account_healthy(db, acc, *, probe_ratelimit: bool = False) -> bool:
+    """检测账号是否可用。失败则标记状态并返回 False。
+
+    只用一次笔记探测（check_crawl）——它同时覆盖「风控」与「登录失效」：
+    笔记接口在 cookie 失效时同样报「登录已过期」，故无需再单独调 check_cookie。
+    probe_ratelimit=True 时才探测（切换账号时）；间隔内复用不探测，
+    靠抓取失败兜底切换，避免每 20 秒打一次抓取请求加重风控。
+    """
+    if not acc or not acc.cookie:
+        return False
+    if not probe_ratelimit:
+        return True  # 不探测（间隔内复用），直接放行，靠抓取失败兜底
+    if not acc.xhs_user_id:
+        return True  # 无已存 uid，无法探测，保守放行（抓取失败会兜底标记）
+    try:
+        d_ok, d_err = check_crawl(acc.cookie, acc.xhs_user_id)
+    except Exception as e:  # noqa: BLE001
+        d_ok, d_err = False, str(e)
+    if d_ok:
+        return True
+    kind = classify_account_error(d_err)
+    if kind == "rate_limited":
+        acc.status = "rate_limited"
+        acc.last_checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _set_account_cooldown(db, acc.id, _ACCOUNT_COOLDOWN_SECONDS)
+        db.commit()
+        _LOG.warning("账号#%s %s 风控中（切换前探测）: %s", acc.id, acc.name, d_err)
+        return False
+    if kind == "expired":
+        acc.status = "expired"
+        acc.last_checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        db.commit()
+        _LOG.warning("账号#%s %s 已失效（切换前探测）: %s", acc.id, acc.name, d_err)
+        return False
+    # unknown（网络抖动等）：不标记状态，保守本轮不用，下一轮再试
+    _LOG.warning("账号#%s %s 检测异常（切换前探测）: %s", acc.id, acc.name, d_err)
+    return False
+
+
+def _pick_next_healthy_account(db, accounts, cur_id: int):
+    """从 cur_id 的下一个开始循环，找第一个可用账号；都不可用返回 None。
+
+    - active 账号：做完整检测（风控探测），健康才用；
+    - rate_limited 账号：冷却到期后才探测，已恢复则改回 active 并用，
+      冷却未到期则跳过（避免持续请求加重风控）；
+    - expired / unknown / paused：不自动尝试（需用户手动处理）。
+
+    候选账号并行探测（各用独立会话），一次拿到全部健康状态，按顺序选第一个，
+    避免串行逐个探测的累计延迟（每个探测约 2.5s）。
+    """
+    ids = [a.id for a in accounts]
+    if not ids:
+        return None
+    if cur_id in ids:
+        idx = ids.index(cur_id)
+        order = ids[idx + 1:] + ids[:idx + 1]
+    else:
+        order = ids
+    now = time.time()
+
+    # 1) 筛出可探测的候选（active，或 rate_limited 且冷却到期）
+    candidates = []
+    for aid in order:
+        acc = db.get(Account, aid)
+        if not acc or not acc.cookie:
+            continue
+        if acc.status == "rate_limited":
+            if _account_cooldown_until(db, aid) > now:
+                continue  # 冷却未到期，跳过
+        elif acc.status != "active":
+            continue  # expired / unknown / paused 不自动尝试
+        candidates.append(aid)
+    if not candidates:
+        return None
+
+    # 2) 并行探测（每账号独立会话，避免并发写同一 SQLAlchemy session）
+    def _probe(aid: int):
+        d = SessionLocal()
+        try:
+            a = d.get(Account, aid)
+            if not a or not a.cookie:
+                return aid, False
+            return aid, _account_healthy(d, a, probe_ratelimit=True)
+        finally:
+            d.close()
+
+    healthy: dict = {}
+    if len(candidates) == 1:
+        aid = candidates[0]
+        healthy[aid] = _probe(aid)[1]
+    else:
+        with ThreadPoolExecutor(max_workers=len(candidates)) as ex:
+            for aid, ok in ex.map(_probe, candidates):
+                healthy[aid] = ok
+
+    # 3) 按顺序选第一个健康的（恢复 active 标记）
+    for aid in order:
+        if healthy.get(aid) is not True:
+            continue
+        db.expire_all()  # 强制重新加载，拿到并行探测里更新的最新状态
+        acc = db.get(Account, aid)
+        if acc is None:
+            continue
+        if acc.status != "active":
+            acc.status = "active"
+            acc.last_checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            db.commit()
+            _LOG.info("账号#%s %s 已解除风控，重新参与轮询", acc.id, acc.name)
+        return acc
+    return None
 
 
 def _note_to_dict(note: Note) -> dict:
@@ -391,10 +540,11 @@ def retry_failed_pushes(db) -> dict:
     return {"retried": retried}
 
 
-def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False,
-                    force: bool = False) -> dict:
+def refresh_blogger(db, blogger_id: int, *, account_id: int = 0,
+                    establish_baseline: bool = False, force: bool = False) -> dict:
     """抓取一个博主，识别新笔记并入库、推送。
 
+    account_id：用哪个账号抓取（账号轮询时由调度器传入当前健康账号）。
     establish_baseline=True 时只建立基线不入库（用于添加博主那一刻）。
     force=True 时忽略监控时段（用户手动点「抓取」时使用）。
     入库条件（同时满足）：① 不在基线中；② 不在已入库去重集；③ 今天发布；④ 晚于监控起点。
@@ -406,11 +556,18 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False,
     if not force and not establish_baseline and not in_monitor_window(blogger):
         return {"ok": False, "error": "当前不在监控时段", "skipped_by_window": True}
 
-    account = db.get(Account, blogger.account_id) if blogger.account_id else None
+    account = db.get(Account, account_id) if account_id else None
+    if account is None:
+        # 未指定账号：自动选一个健康账号（添加博主建基线 / 手动抓取）
+        accounts = (db.query(Account)
+                    .filter(Account.status == "active")
+                    .order_by(Account.id.asc())
+                    .all())
+        account = _pick_next_healthy_account(db, accounts, 0)
     if not account or not account.cookie:
-        blogger.last_error = "未指定有效账号"
+        blogger.last_error = "无可用账号"
         db.commit()
-        return {"ok": False, "error": "未指定有效账号"}
+        return {"ok": False, "error": "无可用账号"}
 
     # 首次抓取且未设监控起点：以当前时刻为起点（添加博主那一刻）
     if not blogger.monitor_since:
@@ -426,6 +583,7 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False,
     ok, notes, nickname, error = fetch_notes_page(
         account.cookie, blogger.url,
         num=num,
+        account_user_id=account.xhs_user_id or "",
     )
 
     if not ok:
@@ -435,10 +593,16 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False,
         db.commit()
         _LOG.warning("博主#%s %s 抓取失败: %s", blogger.id, blogger.name, error)
         if account and _is_rate_limited(error):
-            # 风控：暂停该账号一段时间，避免持续请求加重风控
+            # 风控：标记状态 + 记录冷却（冷却到期后 _pick_next_healthy_account 会自动重试恢复）
+            account.status = "rate_limited"
+            account.last_checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             _set_account_cooldown(db, account.id, _ACCOUNT_COOLDOWN_SECONDS)
+            db.commit()
             _alert_account_ratelimit(db, account, blogger.name, error)
-        elif account and any(k in (error or "") for k in _EXPIRY_KEYWORDS):
+        elif account and any(k in (error or "") for k in EXPIRY_KEYWORDS):
+            account.status = "expired"
+            account.last_checked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            db.commit()
             _alert_account_expiry(db, account, blogger.name)
         return {"ok": False, "error": error or "抓取失败"}
 
@@ -447,19 +611,16 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False,
     blogger.last_crawled_at = _now_ms()
     blogger.last_error = ""
 
-    # 归一化：跳过置顶笔记，再做早停（列表按时间倒序，遇到「非今天」的旧笔记即可停止）。
-    # 置顶笔记永远排最前，必须 continue 跳过而非 break；publish_time 缺失(0)不触发早停。
+    # 归一化：跳过置顶笔记（置顶永远排最前，必须 continue 跳过而非 break）。
+    # 不做「非今天即早停」——num 已很小（默认 5），早停收益可忽略；若接口排序
+    # 偶发不严格倒序，早停反而会漏掉排在后面的今天新笔记。全量归一化后交给三重过滤兜底。
     normalized = []
     for n in notes:
         if not (isinstance(n, dict) and n.get("note_id")):
             continue
         if is_pinned(n):
             continue
-        norm = normalize_note(n)
-        pt = norm.get("publish_time") or 0
-        if pt > 0 and not _is_published_today(pt):
-            break
-        normalized.append(norm)
+        normalized.append(normalize_note(n))
     current_ids = [n["note_id"] for n in normalized]
     baseline = _get_baseline(blogger)
 
@@ -548,37 +709,70 @@ def refresh_blogger(db, blogger_id: int, *, establish_baseline: bool = False,
 
 
 def check_and_crawl() -> dict:
-    """扫描所有 active 博主，按间隔判断到期，并发抓取（每轮限流错峰）。
+    """账号轮询监控：用「当前账号」抓取所有到期博主。
 
-    - 时段外整轮跳过、不占名额；
-    - 到期排序按「最久未抓取优先」（LRU），避免 id 靠后的博主长期饿死；
-    - 抓取并发执行（每博主独立会话），缩短整轮耗时、避免 misfire。
+    - 默认每 account_switch_minutes 分钟切换到下一个健康账号；
+    - 切换前先检测账号状态，正常才用，否则标记状态并继续切下一个；
+    - 抓取中账号触发风控会被标记 rate_limited，下一轮自动切换到下一个账号；
+    - 到期排序按「最久未抓取优先」（LRU），避免 id 靠后的博主长期饿死。
     """
     _setup_logging()
     db = SessionLocal()
     due_ids = []
-    max_per_round = MAX_PER_ROUND  # 默认值，防 get_tunables 异常
+    account_id = 0
+    account_name = ""
+    max_per_round = MAX_PER_ROUND
+    switch_minutes = 10
     skipped_window = 0
-    skipped_cooldown = 0
     try:
-        max_per_round = get_tunables(db)["max_per_round"]
+        tun = get_tunables(db)
+        max_per_round = tun["max_per_round"]
+        switch_minutes = tun["account_switch_minutes"]
+
+        # 1. 候选账号：active + rate_limited（后者冷却到期后可自动重试恢复）
+        accounts = (db.query(Account)
+                    .filter(Account.status.in_(["active", "rate_limited"]))
+                    .order_by(Account.id.asc())
+                    .all())
+        if not accounts:
+            _LOG.info("无可用账号，本轮跳过")
+            return {"checked": 0, "skipped_window": 0, "results": []}
+
+        # 2. 确定当前账号：切换间隔内仍 active 则复用（不做每轮检测，抓取失败会自动兜底切换）；
+        #    否则切换到下一个可用账号（切换时才做完整检测：登录态 + 风控探测）。
+        cur_id = _get_current_account_id(db)
+        switched_at = _get_switched_at(db)
+        now = time.time()
+
+        current = None
+        if cur_id and now - switched_at < switch_minutes * 60:
+            acc = db.get(Account, cur_id)
+            if acc and acc.status == "active":
+                current = acc
+
+        if current is None:
+            current = _pick_next_healthy_account(db, accounts, cur_id)
+            if current is None:
+                _LOG.warning("所有账号均不可用（风控/失效），本轮跳过")
+                return {"checked": 0, "skipped_window": 0, "results": []}
+            _set_current_account(db, current.id)
+
+        account_id = current.id
+        account_name = current.name
+
+        # 3. 用当前账号抓取到期博主
         bloggers = (db.query(Blogger)
                     .filter(Blogger.status == "active")
                     .order_by(Blogger.id.asc())
                     .all())
         now_ms = _now_ms()
-        now = time.time()
-        in_window = []
+        due = []
         for b in bloggers:
             if not in_monitor_window(b):
                 skipped_window += 1
                 continue
-            # 账号风控冷却中：整轮跳过，不消耗名额、也不触发请求
-            if b.account_id and _account_cooldown_until(db, b.account_id) > now:
-                skipped_cooldown += 1
-                continue
-            in_window.append(b)
-        due = [b for b in in_window if _is_due(b, now_ms)]
+            if _is_due(b, now_ms, switch_minutes):
+                due.append(b)
         due.sort(key=lambda b: b.last_attempt_at or 0)  # 最久未抓取优先
         due_ids = [b.id for b in due[:max_per_round]]
     finally:
@@ -589,7 +783,7 @@ def check_and_crawl() -> dict:
     def _run(bid: int) -> dict:
         d = SessionLocal()
         try:
-            return {"blogger_id": bid, **refresh_blogger(d, bid)}
+            return {"blogger_id": bid, **refresh_blogger(d, bid, account_id=account_id)}
         finally:
             d.close()
 
@@ -610,8 +804,8 @@ def check_and_crawl() -> dict:
     finally:
         db2.close()
 
-    _LOG.info("轮巡结束 抓取=%d 时段外=%d 风控冷却=%d 补偿重推=%d",
-              len(results), skipped_window, skipped_cooldown, retried)
+    _LOG.info("轮巡结束 账号=%s(#%s) 抓取=%d 时段外=%d 补偿重推=%d",
+              account_name, account_id, len(results), skipped_window, retried)
     for r in results:
         _LOG.info("  - 博主#%s ok=%s new=%d pushed=%s err=%s",
                   r.get("blogger_id"), r.get("ok"), r.get("new_count", 0),
@@ -620,7 +814,8 @@ def check_and_crawl() -> dict:
     return {
         "checked": len(results),
         "skipped_window": skipped_window,
-        "skipped_cooldown": skipped_cooldown,
+        "account_id": account_id,
+        "account_name": account_name,
         "retried": retried,
         "results": results,
     }
@@ -647,8 +842,8 @@ def start_scheduler() -> None:
             misfire_grace_time=SCHEDULER_INTERVAL,  # 一轮略超时仍补跑，避免整体错位
         )
         _scheduler.start()
-        _LOG.info("调度器启动 间隔=%ds 每轮上限=%d 下限=%d分钟",
-                  SCHEDULER_INTERVAL, MAX_PER_ROUND, MIN_INTERVAL_MINUTES)
+        _LOG.info("调度器启动 间隔=%ds（并发数/切换间隔/抓取条数/推送时效由后台「系统设置」动态读取）",
+                  SCHEDULER_INTERVAL)
 
 
 def stop_scheduler() -> None:

@@ -69,8 +69,6 @@ class Blogger(Base):
     name = Column(String(128), default="")
     url = Column(Text, default="")
     xhs_user_id = Column(String(64), default="")
-    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True)
-    interval_minutes = Column(Integer, default=60)
     status = Column(String(16), default="active")  # active / paused
     # 监控时段（抓取时段）：'HH:MM' 字符串，闭区间 [monitor_start, monitor_end]。
     # 两端都为空 → 全天监控（兼容历史博主）；start > end 视为跨天（如 22:00-06:00）。
@@ -99,8 +97,6 @@ class Blogger(Base):
             "name": self.name,
             "url": self.url,
             "xhs_user_id": self.xhs_user_id,
-            "account_id": self.account_id,
-            "interval_minutes": self.interval_minutes,
             "monitor_start": self.monitor_start or "",
             "monitor_end": self.monitor_end or "",
             "status": self.status,
