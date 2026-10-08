@@ -1061,6 +1061,9 @@ const app = Vue.createApp({
       this.browserStatusColor = '#8a919f';
     },
     resetAccountDialog() {
+      // 关闭弹窗（点 X / ESC / 遮罩）也要停掉后端无头浏览器，
+      // 否则无头 Chrome 会一直驻留后台空转（此前漏了这一句）。
+      if (this.browserRunning) this.stopBrowserLogin();
       this.stopBrowserPolling();
       this.stopFrameStream();
       this.accountForm = { name: '', cookie: '' };

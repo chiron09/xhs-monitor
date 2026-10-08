@@ -306,6 +306,30 @@ def _kill_tree(pid: int) -> None:
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
 
+def _port_owner_pid(port: int) -> int | None:
+    """用 netstat 反查监听指定端口的进程 pid（兜底清理残留无头 Chrome）。
+
+    chrome 的启动器进程在 Windows 上可能启动真正的 browser 进程后立即退出，
+    导致 pid 文件记录的是「已退出的启动器 pid」，而真正驻留、监听调试端口的
+    是它的孤儿子进程。仅靠 pid 文件杀不到，这里用端口反查补一刀。
+    """
+    try:
+        out = subprocess.run(  # noqa: S603
+            ["netstat", "-ano", "-p", "tcp"],
+            capture_output=True, text=True, timeout=10, check=False)
+    except Exception:  # noqa: BLE001
+        return None
+    for line in (out.stdout or "").splitlines():
+        if f":{port}" in line and "LISTENING" in line:
+            parts = line.split()
+            if parts:
+                try:
+                    return int(parts[-1])
+                except ValueError:
+                    pass
+    return None
+
+
 # ================= 登录浏览器主逻辑 =================
 
 def _pick_page_target():
@@ -737,6 +761,10 @@ def stop() -> None:
     for pid in (_state.get("pid"), _read_pid()):
         if pid and pid not in candidates:
             candidates.append(pid)
+    # 兜底：chrome 启动器可能已退出、pid 文件失效，此时按调试端口反查真正驻留的进程
+    owner = _port_owner_pid(DEBUG_PORT)
+    if owner and owner not in candidates:
+        candidates.append(owner)
     for pid in candidates:
         if _pid_is_chrome(pid):
             _kill_tree(pid)
