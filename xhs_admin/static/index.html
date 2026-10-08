@@ -372,11 +372,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Micr
             <el-button @click="openFollowImport">导入关注列表</el-button>
             <el-button @click="loadBloggers"><el-icon><refresh></refresh></el-icon>刷新</el-button>
             <el-button :disabled="!bloggerSelection.length" @click="openBatchDialog">批量修改（{{bloggerSelection.length}}）</el-button>
+            <div class="spacer"></div>
+            <el-input v-model="bloggerKeyword" placeholder="搜索博主名 / ID / 链接" clearable style="width:240px">
+              <template #prefix><el-icon><search></search></el-icon></template>
+            </el-input>
             <span class="hint">添加后立即建立基线，此后只记录新发布的笔记</span>
           </div>
           <div class="card">
             <div class="table-scroll">
-            <el-table :data="bloggers" stripe @selection-change="onBloggerSelectionChange" empty-text="暂无博主，点击上方「添加博主」">
+            <el-table :data="filteredBloggers" stripe @selection-change="onBloggerSelectionChange" empty-text="暂无博主，点击上方「添加博主」">
               <el-table-column type="selection" width="45"></el-table-column>
               <el-table-column prop="id" label="ID" width="60"></el-table-column>
               <el-table-column prop="name" label="博主名" min-width="110"></el-table-column>
@@ -757,6 +761,7 @@ const app = Vue.createApp({
       pendingEvents: [],
       // 博主
       bloggers: [],
+      bloggerKeyword: '',
       bloggerDialogVisible: false,
       bloggerEditId: null,
       bloggerForm: { name: '', url: '', windowOn: false, monitor_start: '', monitor_end: '' },
@@ -804,6 +809,16 @@ const app = Vue.createApp({
   computed: {
     pageTitle() {
       return { accounts:'账号管理', bloggers:'博主监控', notes:'笔记记录', settings:'系统设置' }[this.activeTab] || '';
+    },
+    filteredBloggers() {
+      const k = (this.bloggerKeyword || '').trim().toLowerCase();
+      if (!k) return this.bloggers;
+      return this.bloggers.filter(b => {
+        return (b.name || '').toLowerCase().includes(k)
+          || String(b.id).includes(k)
+          || (b.xhs_user_id || '').toLowerCase().includes(k)
+          || (b.url || '').toLowerCase().includes(k);
+      });
     },
   },
   mounted() {
